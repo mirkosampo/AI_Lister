@@ -1,0 +1,21 @@
+# Dati locali: catalogo, impostazioni, note personali
+data/
+
+# Segreti (token di `claude setup-token`)
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Strumenti locali
+.claude/
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store

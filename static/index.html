@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Lister</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%236d5efc'/><path d='M9 22l7-13 7 13M12 17h8' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">A</div>
+      <div>
+        <div class="brand-name">AI Lister</div>
+        <div class="brand-sub" id="brandStats">—</div>
+      </div>
+    </div>
+    <label class="search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="search" type="search" placeholder="Cerca modelli, sviluppatori, tag…  ( / )" autocomplete="off">
+    </label>
+    <div class="top-actions">
+      <button class="btn ghost" id="btnAddVideo" title="Analizza uno o più video specifici">＋ Video</button>
+      <button class="btn primary" id="btnScan">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        <span>Cerca nuovi modelli</span>
+      </button>
+      <button class="icon-btn" id="btnSettings" title="Impostazioni">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+      <button class="icon-btn" id="btnTheme" title="Tema chiaro/scuro">
+        <svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="banner"></div>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <nav class="views" id="views">
+        <button data-view="models" class="active">Modelli <span class="count" id="cntModels">0</span></button>
+        <button data-view="videos">Video <span class="count" id="cntVideos">0</span></button>
+        <button data-view="channels">Canali <span class="count" id="cntChannels">0</span></button>
+      </nav>
+      <div id="filters">
+        <button class="fav-toggle" id="favToggle">★ Solo preferiti</button>
+        <h4>Categorie</h4>
+        <ul class="cat-list" id="catList"></ul>
+        <h4>Licenza</h4>
+        <div class="chips" id="licChips"></div>
+        <h4>Disponibilità</h4>
+        <div class="chips" id="availChips"></div>
+        <button class="link-btn" id="resetFilters">Azzera filtri</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="toolbar" id="toolbar">
+        <div class="result-info" id="resultInfo"></div>
+        <div class="toolbar-right">
+          <select id="sort" title="Ordina">
+            <option value="recent">Aggiunti di recente</option>
+            <option value="release">Data di rilascio</option>
+            <option value="name">Nome A→Z</option>
+            <option value="params">Parametri (più grandi)</option>
+            <option value="params_asc">Parametri (più piccoli)</option>
+            <option value="sources">Più citati</option>
+          </select>
+          <div class="seg" id="layoutSeg">
+            <button data-layout="grid" class="active" title="Schede">▦</button>
+            <button data-layout="table" title="Tabella">☰</button>
+          </div>
+          <a class="btn ghost small" href="/api/export" title="Esporta JSON">Esporta</a>
+        </div>
+      </div>
+      <div id="content"></div>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true"></aside>
+
+  <section class="scan-panel" id="scanPanel" hidden>
+    <div class="scan-head">
+      <div class="scan-title">
+        <span class="spinner" id="scanSpinner"></span>
+        <div>
+          <strong id="scanTitle">Ricerca in corso</strong>
+          <div class="scan-sub" id="scanSub"></div>
+        </div>
+      </div>
+      <div class="scan-actions">
+        <button class="btn danger small" id="btnCancel">Annulla</button>
+        <button class="icon-btn small" id="btnScanToggle" title="Espandi/riduci">▾</button>
+        <button class="icon-btn small" id="btnScanClose" title="Chiudi">✕</button>
+      </div>
+    </div>
+    <div class="progress"><div id="scanBar"></div></div>
+    <div class="scan-log" id="scanLog"></div>
+  </section>
+
+  <dialog id="dlgSettings">
+    <form method="dialog" id="settingsForm">
+      <h3>Impostazioni</h3>
+      <div id="healthBox" class="health"></div>
+      <label>Modello Claude
+        <input name="model" placeholder="sonnet, opus, fable o nome completo">
+      </label>
+      <label>Effort
+        <select name="effort">
+          <option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="web_enrich">
+        Verifica con ricerche web (licenze, parametri, Hugging Face, paper) — più accurato ma più lento
+      </label>
+      <label>Video recenti da controllare per canale
+        <input name="videos_per_scan" type="number" min="1" max="100">
+      </label>
+      <label>Lingua delle descrizioni
+        <input name="language">
+      </label>
+      <label>Timeout per video (secondi)
+        <input name="timeout_sec" type="number" min="60">
+      </label>
+      <label>Percorso Claude CLI <small>(vuoto = automatico)</small>
+        <input name="claude_path" placeholder="C:\Users\…\claude.exe">
+      </label>
+      <div class="dlg-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Annulla</button>
+        <button class="btn primary" value="save">Salva</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgVideo">
+    <form method="dialog" id="videoForm">
+      <h3>Analizza video specifici</h3>
+      <p class="muted">Incolla uno o più link YouTube (uno per riga). Funziona anche con video di canali non in lista.</p>
+      <textarea name="urls" rows="5" placeholder="https://www.youtube.com/watch?v=…"></textarea>
+      <div class="dlg-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Annulla</button>
+        <button class="btn primary" value="go">Analizza</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
