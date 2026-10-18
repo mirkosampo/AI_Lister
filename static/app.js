@@ -21,6 +21,15 @@ const state = {
   logSize: 0,
   lastCounts: "",
   pollTimer: null,
+  // classifiche
+  lb: null,
+  lbTab: "boards",
+  lbBoard: null,
+  lbEntries: {},
+  lbOnlyCatalog: false,
+  lbOnlyOpen: false,
+  lbHighlight: null,
+  lbPollTimer: null,
 };
 
 // ---------- utilità ----------
@@ -93,19 +102,21 @@ const isNew = (m) => m.first_seen && Date.now() - new Date(m.first_seen) < 3 * 8
 // ---------- caricamento dati ----------
 
 async function loadAll() {
-  const [meta, models, videos, channels] = await Promise.all([
-    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"),
+  const [meta, models, videos, channels, lb] = await Promise.all([
+    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"),
   ]);
-  Object.assign(state, { meta, models, videos, channels });
+  Object.assign(state, { meta, models, videos, channels, lb });
   renderSidebar();
   render();
+  if (lb.status.running) pollLeaderboards();
 }
 
 async function refreshData() {
-  const [meta, models, videos, channels] = await Promise.all([
-    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"),
+  const [meta, models, videos, channels, lb] = await Promise.all([
+    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"),
   ]);
-  Object.assign(state, { meta, models, videos, channels });
+  Object.assign(state, { meta, models, videos, channels, lb });
+  state.lbEntries = {};
   renderSidebar();
   render();
   if (state.selectedId) {
@@ -147,6 +158,7 @@ function sorted(list) {
     params: (a, b) => (b.parameters_b ?? -1) - (a.parameters_b ?? -1),
     params_asc: (a, b) => (a.parameters_b ?? Infinity) - (b.parameters_b ?? Infinity),
     sources: (a, b) => b.sources.length - a.sources.length,
+    rank: (a, b) => (bestRanking(a)?.rank ?? Infinity) - (bestRanking(b)?.rank ?? Infinity),
   }[state.sort];
   return [...list].sort(by);
 }
@@ -158,6 +170,7 @@ function renderSidebar() {
   $("#cntModels").textContent = state.models.length;
   $("#cntVideos").textContent = state.videos.length;
   $("#cntChannels").textContent = state.channels.length;
+  $("#cntBoards").textContent = state.lb?.boards.length ?? 0;
   $("#brandStats").textContent = `${state.models.length} modelli · ${meta.stats.videos_done} video analizzati`;
 
   const forCats = baseFiltered("cat");
@@ -193,6 +206,25 @@ function licBadge(m) {
   return `<span class="badge lic" style="--lic:var(--lic-${l})" title="${esc(m.license_name || "")}">${esc(licLabel(l))}</span>`;
 }
 const catBadge = (m) => `<span class="badge cat" style="--cat-color:${catColor(m.category)}">${esc(catLabel(m.category))}</span>`;
+
+// ---------- classifiche: utilità condivise ----------
+
+const bestRanking = (m) => (m.rankings || []).reduce((best, r) => (!best || r.rank < best.rank ? r : best), null);
+
+function rankBadge(m, maxRank = 20) {
+  const r = bestRanking(m);
+  if (!r || r.rank > maxRank) return "";
+  return `<span class="badge rank ${r.rank <= 3 ? "top" : ""}" title="${esc(`${r.board_name}: #${r.rank} su ${r.entry_count}`)}">🏆 #${r.rank} ${esc(r.board_name.replace("Artificial Analysis", "AA"))}</span>`;
+}
+
+function fmtScore(score, unit) {
+  if (score == null) return "—";
+  if (unit === "elo") return Math.round(score).toString();
+  if (unit === "%") return score.toFixed(1) + "%";
+  if (unit === "$") return "$" + Math.round(score).toLocaleString("it-IT");
+  if (unit === "min") return score >= 60 ? (score / 60).toFixed(1) + " h" : Math.round(score) + " min";
+  return Math.abs(score) < 1 ? score.toFixed(3) : score.toFixed(1);
+}
 
 const LINK_SHORT = { huggingface: "HF", github: "GitHub", paper: "Paper", demo: "Demo", website: "Sito", api: "API", download: "Download", blog: "Blog" };
 function miniLinks(m) {
@@ -230,12 +262,13 @@ function renderModels() {
 
   if (state.layout === "table") {
     return `<div class="table-wrap"><table><thead><tr>
-      <th></th><th>Modello</th><th>Categoria</th><th>Licenza</th><th>Parametri</th><th>Rilascio</th><th>Link</th></tr></thead><tbody>
+      <th></th><th>Modello</th><th>Categoria</th><th>Licenza</th><th>Parametri</th><th>Classifica</th><th>Rilascio</th><th>Link</th></tr></thead><tbody>
       ${list.map((m) => `<tr data-id="${m.id}">
         <td><button class="star ${m.starred ? "on" : ""}" data-star="${m.id}">★</button></td>
         <td><b>${isNew(m) ? '<span class="new-dot"></span>' : ""}${esc(m.name)}</b><span class="card-dev">${esc(m.developer || "")}</span></td>
         <td>${catBadge(m)}</td><td>${licBadge(m)}</td>
         <td>${esc(m.parameters || "—")}</td>
+        <td>${rankBadge(m, 1000) || '<span class="muted">—</span>'}</td>
         <td class="meta-small">${esc(fmtDate(m.release_date || m.sources[0]?.published_at))}</td>
         <td><div class="links-mini">${miniLinks(m)}</div></td></tr>`).join("")}
       </tbody></table></div>`;
@@ -250,7 +283,7 @@ function renderModels() {
         </div>
         <button class="star ${m.starred ? "on" : ""}" data-star="${m.id}" title="Preferito">★</button>
       </div>
-      <div class="badges">${catBadge(m)}${licBadge(m)}${m.parameters ? `<span class="badge">${esc(m.parameters)}</span>` : ""}</div>
+      <div class="badges">${catBadge(m)}${licBadge(m)}${m.parameters ? `<span class="badge">${esc(m.parameters)}</span>` : ""}${rankBadge(m)}</div>
       <div class="card-summary">${esc(m.summary || "")}</div>
       <div class="card-foot">
         <div class="links-mini">${miniLinks(m)}</div>
@@ -311,8 +344,179 @@ function renderChannels() {
     </div>`;
 }
 
+// ---------- vista classifiche ----------
+
+const LB_COLUMNS = {
+  votes: { label: "Voti", fmt: (v) => (v == null ? "—" : Number(v).toLocaleString("it-IT")) },
+  release_date: { label: "Rilascio", fmt: (v) => esc(fmtDate(v) || "—") },
+  coding_index: { label: "Coding", fmt: (v) => (v == null ? "—" : v.toFixed(1)) },
+  math_index: { label: "Math", fmt: (v) => (v == null ? "—" : v.toFixed(1)) },
+  price: { label: "$ / 1M token", fmt: (v) => (v == null ? "—" : "$" + v.toFixed(2)) },
+  speed: { label: "Token/s", fmt: (v) => (v == null ? "—" : Math.round(v)) },
+  ttft: { label: "Latenza", fmt: (v) => (v == null ? "—" : v.toFixed(2) + " s") },
+};
+
+function lbHeader() {
+  const s = state.lb.status;
+  const updated = s.fetched_at ? `aggiornate ${relTime(s.fetched_at)}` : "mai scaricate";
+  return `<div class="lb-top">
+    <div class="seg lb-tabs">
+      <button data-lbtab="boards" class="${state.lbTab === "boards" ? "active" : ""}">Classifiche</button>
+      <button data-lbtab="directory" class="${state.lbTab === "directory" ? "active" : ""}">Tutte le leaderboard</button>
+    </div>
+    <div class="lb-refresh">
+      <span class="meta-small">${s.running ? "aggiornamento in corso…" : esc(updated)}</span>
+      <button class="btn small" id="lbRefresh" ${s.running ? "disabled" : ""}>${s.running ? '<span class="spinner tiny"></span>' : "⟳"} Aggiorna</button>
+    </div>
+  </div>`;
+}
+
+function renderDirectory() {
+  const { directory, groups, sources } = state.lb;
+  return Object.entries(groups).map(([g, label]) => {
+    const items = directory.filter((d) => d.group === g);
+    if (!items.length) return "";
+    return `<h3 class="lb-group">${esc(label)}</h3><div class="dir-grid">${items.map((d) => `
+      <a class="dir-card" href="${esc(d.url)}" target="_blank" rel="noopener">
+        <div class="dir-head"><b>${esc(d.name)}</b><span class="dir-ext">↗</span></div>
+        <div class="badges"><span class="badge">${esc(d.method)}</span>
+          ${d.integrated === "aa" && !state.lb.aa_key_set
+            ? `<span class="badge" title="Imposta la chiave gratuita nelle impostazioni per importarne i dati">○ dati nell'app con chiave API</span>`
+            : d.integrated ? `<span class="badge integrated" title="I dati di ${esc(sources[d.integrated].name)} sono importati in AI Lister">● dati nell'app</span>` : ""}</div>
+        <p>${esc(d.description)}</p>
+        <span class="dir-url">${esc(d.url.replace(/^https?:\/\/(www\.)?/, ""))}</span>
+      </a>`).join("")}</div>`;
+  }).join("");
+}
+
+function renderBoards() {
+  const { boards, aa_key_set } = state.lb;
+  if (!boards.length) {
+    return `<div class="empty"><div class="big">🏆</div><h3>Nessuna classifica scaricata</h3>
+      <p>Premi <b>Aggiorna</b> per importare le classifiche di Arena ed Epoch AI (servono circa 15 secondi).</p></div>`;
+  }
+  if (!state.lbBoard || !boards.some((b) => b.id === state.lbBoard)) state.lbBoard = boards[0].id;
+  const board = boards.find((b) => b.id === state.lbBoard);
+
+  // selettore raggruppato per categoria del catalogo
+  const byCat = {};
+  boards.forEach((b) => (byCat[b.category] ||= []).push(b));
+  const picker = Object.keys(state.meta.categories).filter((c) => byCat[c]).map((c) => `
+    <div class="lb-pick-row"><span class="lb-pick-cat"><span class="dot" style="background:${catColor(c)}"></span>${esc(catLabel(c))}</span>
+      <div class="chips">${byCat[c].map((b) => `<button class="chip ${b.id === state.lbBoard ? "on" : ""}" data-board="${esc(b.id)}" title="${esc(b.description || "")}">${esc(b.name)}${b.matched ? ` <span class="count">${b.matched}</span>` : ""}</button>`).join("")}</div>
+    </div>`).join("");
+
+  const aaHint = aa_key_set ? "" : `<div class="lb-hint">Vuoi anche <b>Artificial Analysis</b> (Intelligence Index, prezzi, velocità, arene per immagini, video e voce)?
+    Crea una chiave gratuita (<a href="https://artificialanalysis.ai/documentation" target="_blank" rel="noopener">istruzioni</a>) e incollala nelle <a href="#" id="lbOpenSettings">impostazioni</a>.</div>`;
+
+  const entries = state.lbEntries[board.id];
+  let table = `<div class="muted lb-loading">Caricamento…</div>`;
+  if (entries) {
+    const tokens = state.q.toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = entries.filter((e) =>
+      (!state.lbOnlyCatalog || e.model_id) &&
+      (!state.lbOnlyOpen || e.is_open) &&
+      (!tokens.length || tokens.every((t) => `${e.name} ${e.organization || ""} ${e.model_name || ""}`.toLowerCase().includes(t))));
+    const cols = board.columns || [];
+    table = `<div class="table-wrap"><table class="lb-table"><thead><tr>
+        <th class="num">#</th><th>Modello</th><th>Organizzazione</th><th>Licenza</th><th class="num">${esc(board.metric || "Punteggio")}</th>
+        ${cols.map((c) => `<th class="num">${LB_COLUMNS[c]?.label || c}</th>`).join("")}
+      </tr></thead><tbody>
+      ${rows.map((e) => {
+        const ci = board.unit === "elo" && e.ci_low != null && e.ci_high != null
+          ? `<span class="ci">+${Math.round(e.ci_high - e.score)}/−${Math.round(e.score - e.ci_low)}</span>` : "";
+        return `<tr class="${e.model_id ? "in-catalog" : ""} ${state.lbHighlight === e.model_id && e.model_id ? "hl" : ""}" ${e.model_id ? `data-model="${e.model_id}"` : ""}>
+          <td class="num rank-cell">${e.rank ?? "—"}</td>
+          <td><b>${esc(e.name)}</b>${e.model_id ? ` <span class="badge in-cat" title="Apri la scheda nel catalogo">nel catalogo</span>` : ""}</td>
+          <td class="muted">${esc(e.organization || "")}</td>
+          <td>${e.is_open == null ? '<span class="muted">—</span>' : e.is_open ? `<span class="badge lic" style="--lic:var(--lic-open_weights)" title="${esc(e.license || "")}">Open</span>` : `<span class="badge lic" style="--lic:var(--lic-closed)">Chiuso</span>`}</td>
+          <td class="num"><b>${fmtScore(e.score, board.unit)}</b>${ci}</td>
+          ${cols.map((c) => `<td class="num muted">${LB_COLUMNS[c] ? LB_COLUMNS[c].fmt(e.extra[c] ?? e[c]) : esc(e.extra[c] ?? "")}</td>`).join("")}
+        </tr>`;
+      }).join("") || `<tr><td colspan="${5 + cols.length}" class="muted">Nessun modello corrisponde ai filtri.</td></tr>`}
+      </tbody></table></div>`;
+  } else {
+    loadBoard(board.id);
+  }
+
+  return `${aaHint}<div class="lb-picker">${picker}</div>
+    <div class="lb-board-head">
+      <div>
+        <h2>${esc(board.name)}</h2>
+        <p class="muted">${esc(board.description || "")}</p>
+        <div class="meta-small">${board.entry_count} modelli · ${board.matched} nel tuo catalogo${board.publish_date ? ` · dati del ${esc(fmtDate(board.publish_date))}` : ""}
+          · <a href="${esc(board.url)}" target="_blank" rel="noopener">fonte originale ↗</a></div>
+      </div>
+      <div class="lb-filters">
+        <label class="check"><input type="checkbox" id="lbOnlyCatalog" ${state.lbOnlyCatalog ? "checked" : ""}> Solo nel mio catalogo</label>
+        <label class="check"><input type="checkbox" id="lbOnlyOpen" ${state.lbOnlyOpen ? "checked" : ""}> Solo open weights</label>
+      </div>
+    </div>
+    ${table}
+    <p class="attribution">${esc(board.attribution || "")}</p>`;
+}
+
+async function loadBoard(id) {
+  if (loadBoard.pending === id) return;
+  loadBoard.pending = id;
+  try {
+    state.lbEntries[id] = await api(`/api/leaderboards/${encodeURIComponent(id)}`);
+  } finally {
+    loadBoard.pending = null;
+  }
+  if (state.view === "leaderboards" && state.lbBoard === id) {
+    render();
+    const hl = $("#content tr.hl");
+    if (hl) hl.scrollIntoView({ block: "center" });
+  }
+}
+
+function renderLeaderboards() {
+  if (!state.lb) return "";
+  return lbHeader() + (state.lbTab === "directory" ? renderDirectory() : renderBoards());
+}
+
+function openBoard(boardId, modelId = null) {
+  Object.assign(state, { view: "leaderboards", lbTab: "boards", lbBoard: boardId, lbHighlight: modelId, lbOnlyCatalog: false, lbOnlyOpen: false });
+  closeDrawer();
+  renderSidebar();
+  render();
+  window.scrollTo({ top: 0 });
+  const hl = $("#content tr.hl");
+  if (hl) hl.scrollIntoView({ block: "center" });
+}
+
+async function refreshLeaderboards() {
+  try {
+    await api("/api/leaderboards/refresh", { method: "POST" });
+  } catch (e) {
+    toast(e.message);
+  }
+  pollLeaderboards(true);
+}
+
+// notify: a fine aggiornamento ricarica i dati e mostra l'esito
+async function pollLeaderboards(notify = true) {
+  clearTimeout(state.lbPollTimer);
+  const s = await api("/api/leaderboards/status");
+  state.lb.status = s;
+  if (s.running) {
+    if (state.view === "leaderboards") render();
+    state.lbPollTimer = setTimeout(() => pollLeaderboards(notify), 2000);
+    return;
+  }
+  if (notify) {
+    await refreshData();
+    const err = s.log.find((l) => l.level === "error");
+    toast(err ? `Classifiche aggiornate con errori: ${err.msg}` : "Classifiche aggiornate");
+  }
+}
+
 function render() {
-  const html = state.view === "videos" ? renderVideos() : state.view === "channels" ? renderChannels() : renderModels();
+  const html = state.view === "videos" ? renderVideos()
+    : state.view === "channels" ? renderChannels()
+    : state.view === "leaderboards" ? renderLeaderboards()
+    : renderModels();
   $("#content").innerHTML = html;
 }
 
@@ -353,6 +557,14 @@ function renderDrawer(m) {
         ${spec("Rilascio", fmtDate(m.release_date))}${spec("Modalità", io)}
       </div>
     </div>
+
+    ${m.rankings?.length ? `<div class="d-section"><h5>Classifiche</h5>
+      <div class="rank-list">${[...m.rankings].sort((a, b) => a.rank / a.entry_count - b.rank / b.entry_count).map((r) => `
+        <button class="rank-row" data-open-board="${esc(r.board_id)}" title="Apri la classifica">
+          <span class="rr-pos ${r.rank <= 3 ? "top" : ""}">#${r.rank}</span>
+          <span class="rr-name">${esc(r.board_name)}<span class="rr-sub">su ${r.entry_count} modelli${r.entry_name !== m.name ? ` · come «${esc(r.entry_name)}»` : ""}</span></span>
+          <span class="rr-score">${fmtScore(r.score, r.unit)}<span class="rr-sub">${esc(r.metric || "")}</span></span>
+        </button>`).join("")}</div></div>` : ""}
 
     ${m.key_features?.length ? `<div class="d-section"><h5>Caratteristiche principali</h5>
       <ul class="features">${m.key_features.map((f) => `<li>${esc(f)}</li>`).join("")}</ul></div>` : ""}
@@ -514,6 +726,11 @@ async function openSettings() {
        <div class="path">${c.longLivedToken
          ? "Token di lunga durata attivo: nessun conflitto di rinnovo con l'app desktop."
          : "Login OAuth standard. Se compaiono errori di rinnovo del token, vedi «Token di lunga durata» nel README."}</div>`;
+  f.elements.artificial_analysis_api_key.value = "";
+  f.elements.artificial_analysis_api_key.placeholder = s.aa_key_set ? "•••••••• (impostata, lascia vuoto per non cambiarla)" : "Incolla la chiave";
+  $("#aaKeyHint").innerHTML = s.aa_key_set
+    ? `Salvata in <code>.env</code>, non lascia mai il tuo computer. <a href="#" id="aaKeyRemove">Rimuovi chiave</a>`
+    : `Sblocca Intelligence Index, prezzi, velocità e le arene di Artificial Analysis. <a href="https://artificialanalysis.ai/documentation" target="_blank" rel="noopener">Come ottenerla</a>`;
   $("#dlgSettings").showModal();
 }
 
@@ -522,7 +739,8 @@ async function openSettings() {
 function bindEvents() {
   $("#search").addEventListener("input", (e) => {
     state.q = e.target.value;
-    if (state.view !== "models") { state.view = "models"; }
+    // nelle classifiche la ricerca filtra la tabella; altrove porta al catalogo
+    if (state.view !== "models" && state.view !== "leaderboards") state.view = "models";
     renderSidebar();
     render();
   });
@@ -606,6 +824,16 @@ function bindEvents() {
     if (t.closest("#emptyReset")) { resetFilters(); return; }
     if (t.closest("#clearVideoFilter")) { state.videoFilter = null; renderSidebar(); render(); return; }
 
+    // classifiche
+    const lbTab = t.closest("[data-lbtab]");
+    if (lbTab) { state.lbTab = lbTab.dataset.lbtab; render(); return; }
+    const boardBtn = t.closest("[data-board]");
+    if (boardBtn) { Object.assign(state, { lbBoard: boardBtn.dataset.board, lbHighlight: null }); render(); return; }
+    if (t.closest("#lbRefresh")) { refreshLeaderboards(); return; }
+    if (t.closest("#lbOpenSettings")) { e.preventDefault(); openSettings(); return; }
+    const lbRow = t.closest("tr[data-model]");
+    if (lbRow) { openDrawer(+lbRow.dataset.model); return; }
+
     const an = t.closest("[data-analyze]");
     if (an) { startScan({ urls: [an.dataset.analyze] }, "/api/scan/videos"); return; }
     const sv = t.closest("[data-show-video]");
@@ -625,6 +853,11 @@ function bindEvents() {
   });
 
   $("#content").addEventListener("change", async (e) => {
+    if (e.target.id === "lbOnlyCatalog" || e.target.id === "lbOnlyOpen") {
+      state[e.target.id] = e.target.checked;
+      render();
+      return;
+    }
     const tg = e.target.closest("[data-toggle-ch]");
     if (tg) {
       await api(`/api/channels/${tg.dataset.toggleCh}`, { method: "PATCH", body: { enabled: tg.checked } });
@@ -649,6 +882,8 @@ function bindEvents() {
   $("#drawer").addEventListener("click", async (e) => {
     const t = e.target;
     if (t.closest("#drawerClose")) return closeDrawer();
+    const ob = t.closest("[data-open-board]");
+    if (ob) return openBoard(ob.dataset.openBoard, state.selectedId);
     const star = t.closest("[data-star]");
     if (star) return toggleStar(+star.dataset.star);
     const tag = t.closest("[data-tag]");
@@ -705,11 +940,28 @@ function bindEvents() {
     const body = {};
     for (const el of f.elements) {
       if (!el.name) continue;
+      // campo chiave vuoto = lascia invariata quella salvata
+      if (el.name === "artificial_analysis_api_key" && !el.value.trim()) continue;
       body[el.name] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value;
     }
-    await api("/api/settings", { method: "PUT", body });
+    const saved = await api("/api/settings", { method: "PUT", body });
     toast("Impostazioni salvate");
     checkHealth();
+    // nuova chiave Artificial Analysis: importa subito le sue classifiche
+    if (body.artificial_analysis_api_key && saved.aa_key_set) {
+      state.lb.aa_key_set = true;
+      refreshLeaderboards();
+    }
+  });
+  $("#settingsForm").addEventListener("click", async (e) => {
+    if (e.target.id !== "aaKeyRemove") return;
+    e.preventDefault();
+    if (!confirm("Rimuovere la chiave di Artificial Analysis?")) return;
+    await api("/api/settings", { method: "PUT", body: { artificial_analysis_api_key: "" } });
+    $("#dlgSettings").close();
+    state.lb.aa_key_set = false;
+    toast("Chiave rimossa");
+    render();
   });
 
   // tema

@@ -6,8 +6,9 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyzer, db, taxonomy, youtube
-from .config import STATIC_DIR, ensure_dirs, load_settings, save_settings
+from . import analyzer, db, leaderboards, taxonomy, youtube
+from .config import STATIC_DIR, ensure_dirs, get_secret, load_settings, save_settings, set_secret
+from .leaderboards import refresher
 from .scanner import scanner
 
 
@@ -15,6 +16,9 @@ from .scanner import scanner
 async def lifespan(_app: FastAPI):
     ensure_dirs()
     db.init()
+    # classifiche più vecchie di 24 ore: aggiornamento in background all'avvio
+    if refresher.is_stale():
+        refresher.start()
     yield
     db.checkpoint()
 
@@ -67,6 +71,9 @@ def models():
 @app.patch("/api/models/{model_id}")
 def patch_model(model_id: int, fields: dict):
     model = db.update_model(model_id, fields)
+    if model and ("name" in fields or "aliases" in fields):
+        db.match_leaderboards()
+        model = db.get_model(model_id)
     if not model:
         raise HTTPException(404)
     return model
@@ -146,16 +153,56 @@ def scan_status(since: int = 0):
     return scanner.status(since)
 
 
+# ---------- classifiche ----------
+
+@app.get("/api/leaderboards")
+def leaderboards_index():
+    return {
+        "boards": db.list_boards(),
+        "directory": leaderboards.DIRECTORY,
+        "groups": leaderboards.GROUPS,
+        "sources": leaderboards.SOURCES,
+        "status": refresher.status(),
+        "aa_key_set": bool(get_secret("ARTIFICIAL_ANALYSIS_API_KEY")),
+    }
+
+
+@app.get("/api/leaderboards/status")
+def leaderboards_status():
+    return refresher.status()
+
+
+@app.post("/api/leaderboards/refresh")
+def leaderboards_refresh():
+    if not refresher.start():
+        raise HTTPException(409, "Aggiornamento delle classifiche già in corso")
+    return {"ok": True}
+
+
+@app.get("/api/leaderboards/{board_id}")
+def leaderboard_entries(board_id: str):
+    return db.board_entries(board_id)
+
+
 # ---------- impostazioni ----------
+
+def _settings_view() -> dict:
+    # le chiavi segrete non lasciano mai il server: al browser arriva solo se sono impostate
+    return {**load_settings(), "aa_key_set": bool(get_secret("ARTIFICIAL_ANALYSIS_API_KEY"))}
+
 
 @app.get("/api/settings")
 def get_settings():
-    return load_settings()
+    return _settings_view()
 
 
 @app.put("/api/settings")
 def put_settings(values: dict):
-    return save_settings(values)
+    key = values.pop("artificial_analysis_api_key", None)
+    if key is not None:
+        set_secret("ARTIFICIAL_ANALYSIS_API_KEY", key)
+    save_settings(values)
+    return _settings_view()
 
 
 @app.get("/api/health")

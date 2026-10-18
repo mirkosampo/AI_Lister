@@ -82,6 +82,11 @@ class Scanner:
             self._log(f"Errore inatteso: {exc}", "error")
             self._log(traceback.format_exc(), "debug")
         finally:
+            # i modelli appena aggiunti vengono collegati alle classifiche già scaricate
+            try:
+                db.match_leaderboards()
+            except Exception:  # noqa: BLE001
+                pass
             s = self.state
             if self._cancel.is_set() and not self._aborted:
                 self._log("Ricerca annullata.", "warn")

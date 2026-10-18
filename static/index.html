@@ -41,6 +41,7 @@
     <aside class="sidebar" id="sidebar">
       <nav class="views" id="views">
         <button data-view="models" class="active">Modelli <span class="count" id="cntModels">0</span></button>
+        <button data-view="leaderboards">Classifiche <span class="count" id="cntBoards">0</span></button>
         <button data-view="videos">Video <span class="count" id="cntVideos">0</span></button>
         <button data-view="channels">Canali <span class="count" id="cntChannels">0</span></button>
       </nav>
@@ -67,6 +68,7 @@
             <option value="params">Parametri (più grandi)</option>
             <option value="params_asc">Parametri (più piccoli)</option>
             <option value="sources">Più citati</option>
+            <option value="rank">Miglior posizione in classifica</option>
           </select>
           <div class="seg" id="layoutSeg">
             <button data-layout="grid" class="active" title="Schede">▦</button>
@@ -127,6 +129,10 @@
       </label>
       <label>Percorso Claude CLI <small>(vuoto = automatico)</small>
         <input name="claude_path" placeholder="C:\Users\…\claude.exe">
+      </label>
+      <label>Chiave API Artificial Analysis <small>(facoltativa, gratuita)</small>
+        <input name="artificial_analysis_api_key" type="password" autocomplete="off" placeholder="Incolla la chiave">
+        <span class="hint" id="aaKeyHint"></span>
       </label>
       <div class="dlg-actions">
         <button class="btn ghost" value="cancel" formnovalidate>Annulla</button>

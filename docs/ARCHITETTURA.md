@@ -11,6 +11,8 @@ Documento tecnico per chi vuole capire o modificare il codice. Per installazione
 │  - polling di /api/scan/status      │        │    ├─ youtube.py ── yt-dlp, youtube-transcript-api        │
 └─────────────────────────────────────┘        │    ├─ analyzer.py ── subprocess `claude -p`               │
                                                │    └─ db.py ── SQLite (data/ai_lister.db)                 │
+                                               │ leaderboards.py ── thread di aggiornamento classifiche    │
+                                               │    └─ Arena (HF parquet) · Epoch AI (CSV) · AA (API)      │
                                                └───────────────────────────────────────────────────────────┘
 ```
 
@@ -61,6 +63,38 @@ e accetta facoltativamente `existing_slug`, `aliases`, `developer`, `tags`, `mod
 `release_date`, `key_features`, `availability` e `timestamp_sec`. Categorie, licenze, modalità, disponibilità e tipi di link
 sono enum presi da `app/taxonomy.py`, quindi aggiungere una categoria lì la rende subito disponibile sia a Claude sia alla GUI.
 
+## Classifiche (`app/leaderboards.py`)
+
+Il modulo contiene la directory curata (`DIRECTORY`, raggruppata per `GROUPS`) e un importatore per ogni fonte
+con dati aperti. Ogni importatore restituisce una lista di coppie `(board, entries)` con un formato comune:
+
+- **board**: `id` (es. `arena:text`, `epoch:gpqa_diamond`, `aa:intelligence_index`), `source`, `name`, `category` (chiave di `taxonomy.CATEGORIES`),
+  `metric`, `unit` (`elo`, `%`, `min`, `$` o vuoto, per la formattazione), `description`, `url`, `attribution`, `columns` (colonne extra da mostrare), `position`, `publish_date`;
+- **entry**: `rank`, `name`, `organization`, `license`, `is_open` (1/0/None), `score`, `ci_low`, `ci_high`, `votes`, `extra` (dizionario libero: prezzo, velocità, data di rilascio…).
+
+| Fonte | Come vengono letti i dati |
+|---|---|
+| `fetch_arena` | per ogni arena, `huggingface.co/api/datasets/lmarena-ai/leaderboard-dataset/parquet/<config>/latest` restituisce gli URL dei file Parquet, letti con `pyarrow`; si tiene solo `category == "overall"`. L'arena *agent* usa `score` invece di `rating`. |
+| `fetch_epoch` | scarica `epoch.ai/data/benchmark_data.zip` e legge `eci_scores.csv` più i CSV in `EPOCH_BENCHMARKS`. I nomi leggibili e l'accessibilità (open weights) arrivano da `model_metadata.csv` e `processed_data_for_eci.csv`; per ogni nome si tiene il punteggio migliore, poi si calcola il rango. |
+| `fetch_aa` | `GET /api/v2/data/llms/models` e `/media/<tipo>` con l'header `x-api-key`, solo se `ARTIFICIAL_ANALYSIS_API_KEY` è impostata (variabile d'ambiente o `.env`). |
+
+`Refresher` esegue gli importatori in un thread: l'errore di una fonte viene registrato nel log e non blocca le altre.
+Ogni classifica viene sostituita per intero (`db.replace_board`), poi `db.delete_boards` rimuove quelle sparite dalla fonte.
+All'avvio del server l'aggiornamento parte da solo se l'ultimo ha più di 24 ore (`STALE_AFTER`).
+
+Per aggiungere una fonte: scrivi una funzione `fetch_<nome>(log)` che restituisca `(board, entries)` nel formato sopra,
+registrala in `FETCHERS` e `SOURCES` e, se vuoi, segnala `integrated` nella voce della directory.
+
+### Collegamento con il catalogo
+
+`db.norm_model_name()` produce una chiave senza separatori, togliendo il prefisso dell'organizzazione (`org/`), il testo tra parentesi,
+il suffisso `_variante` di Epoch, le date e i token finali di configurazione (`high`, `max`, `thinking`, `preview`…):
+`Claude Opus 5.5 (High)` → `claudeopus55`. `db.match_leaderboards()` ricalcola le chiavi e collega le voci con chiave uguale a quella
+del nome o di un alias di un modello del catalogo. Ai modelli senza corrispondenza esatta assegna poi le voci `chiave + taglio`
+(`pro`, `flash`, `mini`, `plus`…). Viene eseguita dopo ogni aggiornamento delle classifiche, alla fine di ogni ricerca e quando si rinomina un modello.
+
+`db.model_rankings()` restituisce per ogni modello la miglior posizione in ogni classifica; `/api/models` la include nel campo `rankings`.
+
 ## Database (`app/db.py`)
 
 SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la connessione è condivisa tra il thread della ricerca e le richieste HTTP.
@@ -71,6 +105,8 @@ SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la co
 | `videos` | id YouTube, canale, titolo, data, miniatura, `status` (`new`/`processing`/`done`/`error`), errore, riassunto, numero di modelli |
 | `models` | una riga per modello; i campi lista (`aliases`, `tags`, `modalities_*`, `key_features`, `availability`, `links`) sono JSON |
 | `model_sources` | relazione modello ↔ video con `timestamp_sec` |
+| `lb_boards` | una riga per classifica: fonte, nome, categoria, metrica, unità, attribuzione, data dei dati, numero di voci |
+| `lb_entries` | voci delle classifiche con `norm` (nome normalizzato) e `model_id` (collegamento al catalogo, `NULL` se assente) |
 
 Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti `processing` tornano `new`.
 
@@ -101,13 +137,18 @@ Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti
 | POST | `/api/scan/videos` | analizza video specifici: `{"urls": ["https://youtu.be/…"]}` |
 | POST | `/api/scan/cancel` | annulla la ricerca in corso |
 | GET | `/api/scan/status?since=N` | stato e righe di log a partire dall'indice N |
-| GET / PUT | `/api/settings` | impostazioni |
+| GET | `/api/leaderboards` | classifiche (senza voci), directory, gruppi, fonti, stato dell'aggiornamento, `aa_key_set` |
+| GET | `/api/leaderboards/{id}` | voci di una classifica, con `model_id` e `model_name` se collegate al catalogo |
+| POST | `/api/leaderboards/refresh` | avvia l'aggiornamento di tutte le fonti (`409` se già in corso) |
+| GET | `/api/leaderboards/status` | stato e log dell'aggiornamento, data dell'ultimo scaricamento |
+| GET / PUT | `/api/settings` | impostazioni; `artificial_analysis_api_key` in PUT salva la chiave in `.env` (stringa vuota = rimuovi), in GET compare solo `aa_key_set` |
 | GET | `/api/health` | CLI trovata, autenticata, token di lunga durata attivo |
 
 La documentazione interattiva generata da FastAPI è su <http://localhost:8765/docs>.
 
 ## Estendere
 
+- **Nuove leaderboard**: per una sola voce nella directory basta aggiungerla a `DIRECTORY`; per importarne i dati vedi [Classifiche](#classifiche-appleaderboardspy). Un benchmark Epoch in più è una riga in `EPOCH_BENCHMARKS`.
 - **Nuove categorie o tipi di link**: aggiungili in `app/taxonomy.py` (etichetta italiana e suggerimento per Claude). Per il colore della categoria aggiungi una tonalità in `CAT_HUES` in `static/app.js`.
 - **Altre fonti oltre a YouTube** (blog, newsletter, feed RSS di Hugging Face o arXiv): basta produrre un dizionario con `title`, `description`, `url` e un testo al posto della trascrizione, e passarlo a `build_prompt()` e `run_analysis()`; il resto della pipeline non cambia.
 - **Usare l'API Anthropic invece della CLI**: sostituisci `run_analysis()` con una chiamata alla Messages API usando lo stesso `OUTPUT_SCHEMA` come strumento o formato di output strutturato.

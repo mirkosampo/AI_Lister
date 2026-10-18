@@ -2,7 +2,7 @@
 
 **Catalogo locale dei modelli di intelligenza artificiale, aggiornato automaticamente analizzando i video dei canali YouTube che segui.**
 
-*A local web app that keeps a searchable catalog of AI models up to date by having Claude analyze new videos from the YouTube channels you follow (descriptions, chapters and transcripts).*
+*A local web app that keeps a searchable catalog of AI models up to date by having Claude analyze new videos from the YouTube channels you follow (descriptions, chapters and transcripts), and links each model to public leaderboards (Arena, Epoch AI, Artificial Analysis).*
 
 ![AI Lister](docs/screenshot.jpg)
 
@@ -19,6 +19,9 @@ Claude estrae ogni modello presentato, lo classifica e, se vuoi, verifica i dati
 - **Filtri**: 17 categorie (LLM, immagini, video, voce, 3D, robotica…), tipo di licenza, disponibilità (locale, API, web app, demo…), preferiti.
 - **Scheda dettagliata** per ogni modello: parametri (anche attivi per i MoE), contesto, architettura, dimensione su disco, VRAM,
   modalità di input/output, caratteristiche principali, link (Hugging Face, GitHub, paper, demo, sito…) e video in cui appare con link al minuto esatto.
+- **Classifiche**: 22 leaderboard importate automaticamente da [Arena](https://arena.ai/leaderboard) ed [Epoch AI](https://epoch.ai/benchmarks)
+  (più 7 da [Artificial Analysis](https://artificialanalysis.ai) con una chiave gratuita), collegate ai modelli del catalogo,
+  e una directory di altre ~30 leaderboard da consultare. Vedi [Classifiche](#classifiche).
 - **Aggiornamento incrementale**: i video già analizzati vengono saltati; se un modello riappare in un altro video la sua scheda viene arricchita, non duplicata.
 - **Più canali**: aggiungi, disattiva o rimuovi canali dalla scheda *Canali*; con **＋ Video** analizzi anche singoli video di qualsiasi canale.
 - **Correzioni manuali**: cambia categoria e licenza, aggiungi note personali, segna i preferiti, elimina voci.
@@ -127,6 +130,53 @@ Categorie: Linguaggio (LLM), Codice, Agenti & Computer use, Multimodale / Vision
 Generazione video, Musica & Audio, Voce (TTS / STT), 3D & Scene, World model, Avatar & Animazione, Robotica,
 Upscaling & Restauro, Embedding & Retrieval, Scienza & Ricerca, Altro. Si modificano in [`app/taxonomy.py`](app/taxonomy.py).
 
+## Classifiche
+
+![Classifiche](docs/classifiche.jpg)
+
+La scheda **Classifiche** riunisce le principali leaderboard dei modelli di IA. Le classifiche vengono scaricate
+all'avvio se hanno più di 24 ore (circa 15 secondi) oppure con il pulsante **Aggiorna**.
+
+### Fonti importate
+
+| Fonte | Classifiche | Accesso |
+|---|---|---|
+| [Arena](https://arena.ai/leaderboard) (ex LMArena) | Elo da voti umani alla cieca: Testo, WebDev, Visione, Documenti, Ricerca web, Agenti, Testo → immagine, Editing immagini, Testo → video, Immagine → video, Editing video | libero ([dataset su Hugging Face](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset), CC-BY 4.0) |
+| [Epoch AI](https://epoch.ai/benchmarks) | Epoch Capabilities Index, GPQA Diamond, Humanity's Last Exam, ARC-AGI-2, SimpleQA Verified, FrontierMath, CritPt, SWE-bench Verified, CursorBench, METR Time Horizon, Vending-Bench 2 | libero ([archivio dati](https://epoch.ai/data), CC-BY 4.0) |
+| [Artificial Analysis](https://artificialanalysis.ai) | Intelligence Index (con coding/math index, prezzo, velocità, latenza), Coding Index, arene Testo → immagine, Editing immagini, Sintesi vocale, Testo → video, Immagine → video | chiave API gratuita, 1000 richieste/giorno |
+
+**Artificial Analysis**: crea una chiave gratuita seguendo la [documentazione](https://artificialanalysis.ai/documentation)
+e incollala in ⚙ Impostazioni → *Chiave API Artificial Analysis*. La chiave viene salvata in `.env` (escluso da git)
+e non viene mai inviata al browser. In alternativa scrivila tu in `.env`:
+
+```
+ARTIFICIAL_ANALYSIS_API_KEY=...
+```
+
+### Collegamento con il catalogo
+
+Ogni voce delle classifiche viene confrontata con i modelli del catalogo tramite un nome normalizzato che ignora
+maiuscole, separatori, date e varianti di configurazione, per cui `Claude Opus 5.5 (High)`, `claude-opus-5.5-high`
+e `Claude Opus 5.5` sono lo stesso modello. Se non c'è corrispondenza esatta vengono collegati i tagli della stessa famiglia
+(`MiMo V2.6` → `mimo-v2.6-pro`, `MiMo-V2.6-Flash`). Il collegamento viene rifatto dopo ogni ricerca e ogni aggiornamento.
+
+Nell'app trovi le posizioni:
+- sulle schede, con un badge 🏆 per la miglior posizione (tra le prime 20);
+- nel dettaglio del modello, con la posizione in ogni classifica (un clic apre la classifica evidenziando il modello);
+- nell'ordinamento *Miglior posizione in classifica*;
+- nelle tabelle, dove i modelli del tuo catalogo sono evidenziati. Ci sono anche i filtri *Solo nel mio catalogo* e *Solo open weights*.
+
+Molti modelli presentati nei video (progetti di ricerca, modelli vocali, robotica) non compaiono in nessuna classifica:
+è normale che restino senza posizione.
+
+### Altre leaderboard
+
+Nella sotto-scheda **Tutte le leaderboard** c'è una directory curata, con descrizione e link, anche delle classifiche
+che non offrono dati scaricabili: LiveBench, Scale SEAL, LLM Stats, Vellum, Kaggle Benchmarks, HELM,
+Humanity's Last Exam, ARC Prize, SimpleBench, Vectara Hallucination, SWE-bench, Terminal-Bench, Aider Polyglot,
+METR, BFCL, OSWorld, GAIA, OpenCompass, Open VLM, le arene di Artificial Analysis, TTS Arena, Open ASR, MTEB, OpenRouter Rankings.
+L'elenco si modifica in [`app/leaderboards.py`](app/leaderboards.py).
+
 ## Impostazioni (icona ⚙)
 
 | Opzione | Default | Note |
@@ -138,8 +188,9 @@ Upscaling & Restauro, Embedding & Retrieval, Scienza & Ricerca, Altro. Si modifi
 | Lingua delle descrizioni | italiano | lingua di riassunto, descrizione e caratteristiche |
 | Timeout per video | 1800 s | |
 | Percorso Claude CLI | automatico | |
+| Chiave API Artificial Analysis | — | facoltativa, salvata in `.env` |
 
-Le impostazioni sono salvate in `data/settings.json`.
+Le impostazioni sono salvate in `data/settings.json`, le chiavi in `.env`.
 
 ## Dati e backup
 
@@ -147,7 +198,7 @@ Tutto resta sul tuo computer, nella cartella `data/` (esclusa da git):
 
 | File | Contenuto |
 |---|---|
-| `data/ai_lister.db` | database SQLite: modelli, video, canali, note e preferiti |
+| `data/ai_lister.db` | database SQLite: modelli, video, canali, note, preferiti e classifiche scaricate |
 | `data/settings.json` | impostazioni |
 | `data/claude_work/` | cartella di lavoro vuota in cui gira la CLI |
 
@@ -165,6 +216,9 @@ nel file principale. In alternativa usa **Esporta** per scaricare il catalogo in
 | Trascrizione non disponibile | l'analisi procede comunque con titolo, descrizione e capitoli |
 | Porta 8765 occupata | chiudi l'altra istanza o cambia `PORT` in `start.bat` |
 | yt-dlp non legge più YouTube | aggiorna le dipendenze: `.venv\Scripts\python -m pip install -U yt-dlp youtube-transcript-api` |
+| Classifiche vuote o non aggiornate | premi **Aggiorna** nella scheda *Classifiche*; eventuali errori di una fonte compaiono in un avviso e non bloccano le altre |
+| *"Artificial Analysis: chiave API non valida"* | ricontrolla la chiave nelle impostazioni (o rimuovila: le altre fonti funzionano comunque) |
+| `No module named 'pyarrow'` | avvia da `start.bat`, che aggiorna le dipendenze, oppure `pip install -r requirements.txt` |
 
 ## Struttura del progetto
 
@@ -174,6 +228,7 @@ app/
   scanner.py     job di ricerca in background (log, nuovi tentativi, annullamento)
   youtube.py     elenco video, dettagli, trascrizioni (yt-dlp, youtube-transcript-api)
   analyzer.py    prompt, JSON Schema e invocazione di `claude -p`
+  leaderboards.py  directory delle leaderboard e importazione da Arena, Epoch AI, Artificial Analysis
   db.py          SQLite e logica di unione dei modelli
   taxonomy.py    categorie, licenze, tipi di link
   config.py      percorsi e impostazioni
@@ -185,11 +240,15 @@ start.bat        avvio su Windows
 ## Privacy
 
 - Il server ascolta solo su `127.0.0.1`: non è raggiungibile da altri dispositivi.
-- Le uniche connessioni esterne sono verso YouTube (metadati e trascrizioni) e verso Claude tramite la CLI; con la verifica web attiva Claude visita anche le pagine dei progetti.
-- Nessuna chiave è salvata nel codice: il login resta gestito dalla CLI, e l'eventuale token sta in `.env`, escluso da git.
+- Le connessioni esterne sono verso YouTube (metadati e trascrizioni), Claude tramite la CLI (con la verifica web attiva Claude visita anche le pagine dei progetti),
+  Hugging Face ed Epoch AI per le classifiche e, solo se hai impostato la chiave, Artificial Analysis.
+- Nessuna chiave è salvata nel codice: il login resta gestito dalla CLI, e i segreti facoltativi (token di lunga durata, chiave Artificial Analysis) stanno in `.env`, escluso da git.
 
 ## Crediti
 
 Costruito con [FastAPI](https://fastapi.tiangolo.com/), [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api) e [Claude Code](https://docs.claude.com/en/docs/claude-code/overview).
 Canale di partenza: [AI Search (@theAIsearch)](https://www.youtube.com/@theAIsearch).
+
+Dati delle classifiche: [Arena](https://arena.ai) (CC-BY 4.0), [Epoch AI](https://epoch.ai) (CC-BY 4.0)
+e [Artificial Analysis](https://artificialanalysis.ai), citati nell'app sotto ogni classifica come richiesto dalle rispettive licenze.

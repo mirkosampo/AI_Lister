@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import taxonomy
-from .config import CLAUDE_WORKDIR, ENV_PATH
+from .config import CLAUDE_WORKDIR, get_secret, read_env
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -78,25 +78,14 @@ def _env() -> dict:
                 env.pop(key)
     # Token di lunga durata (`claude setup-token`) letto da .env: evita i rinnovi OAuth
     # contesi con l'app desktop. Una variabile d'ambiente già impostata ha la precedenza.
-    token = _dotenv().get("CLAUDE_CODE_OAUTH_TOKEN")
+    token = read_env().get("CLAUDE_CODE_OAUTH_TOKEN")
     if token and not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     return env
 
 
-def _dotenv() -> dict:
-    values = {}
-    if ENV_PATH.exists():
-        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
-
 def uses_long_lived_token() -> bool:
-    return bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or _dotenv().get("CLAUDE_CODE_OAUTH_TOKEN"))
+    return bool(get_secret("CLAUDE_CODE_OAUTH_TOKEN"))
 
 
 def auth_status(claude_path: str | None) -> dict:

@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -8,8 +9,10 @@ DB_PATH = DATA_DIR / "ai_lister.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 CLAUDE_WORKDIR = DATA_DIR / "claude_work"
 STATIC_DIR = ROOT / "static"
-# File locale (escluso da git) per il token di `claude setup-token`
+# File locale (escluso da git) per i segreti: token di `claude setup-token`, chiave Artificial Analysis
 ENV_PATH = ROOT / ".env"
+# Segreti che si possono impostare dalla GUI: non vengono mai restituiti al browser
+SECRET_KEYS = ("CLAUDE_CODE_OAUTH_TOKEN", "ARTIFICIAL_ANALYSIS_API_KEY")
 
 DEFAULTS = {
     # Percorso di claude.exe; vuoto = rilevamento automatico (PATH, poi app desktop)
@@ -34,6 +37,34 @@ _lock = threading.Lock()
 def ensure_dirs():
     DATA_DIR.mkdir(exist_ok=True)
     CLAUDE_WORKDIR.mkdir(exist_ok=True)
+
+
+def read_env() -> dict:
+    values = {}
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def get_secret(key: str) -> str:
+    """Variabile d'ambiente se impostata, altrimenti valore in .env."""
+    return os.environ.get(key) or read_env().get(key, "")
+
+
+def set_secret(key: str, value: str):
+    """Scrive (o rimuove, se vuoto) una chiave in .env lasciando intatte le altre righe."""
+    if key not in SECRET_KEYS:
+        raise ValueError(key)
+    with _lock:
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+        lines = [l for l in lines if not l.strip().startswith(key + "=")]
+        if value.strip():
+            lines.append(f"{key}={value.strip()}")
+        ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def load_settings() -> dict:

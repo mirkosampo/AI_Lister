@@ -2,16 +2,24 @@
 setlocal
 cd /d "%~dp0"
 
+where uv >nul 2>nul
+if %errorlevel%==0 (set USE_UV=1) else (set USE_UV=0)
+
 if not exist ".venv\Scripts\python.exe" (
     echo Creo l'ambiente Python...
-    where uv >nul 2>nul
-    if %errorlevel%==0 (
+    if %USE_UV%==1 (
         uv venv .venv --python 3.11 || goto :error
-        uv pip install --python .venv\Scripts\python.exe -r requirements.txt || goto :error
     ) else (
         python -m venv .venv || goto :error
-        .venv\Scripts\python.exe -m pip install -r requirements.txt || goto :error
     )
+)
+
+rem Installa o aggiorna le dipendenze (veloce se sono gia' presenti)
+echo Controllo le dipendenze...
+if %USE_UV%==1 (
+    uv pip install --quiet --python .venv\Scripts\python.exe -r requirements.txt || goto :error
+) else (
+    .venv\Scripts\python.exe -m pip install --quiet --disable-pip-version-check -r requirements.txt || goto :error
 )
 
 set PORT=8765
