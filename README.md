@@ -194,7 +194,8 @@ Il catalogo si può pubblicare su **Firebase Hosting** (piano gratuito):
 
 Configurazione passo passo, struttura dei dati e regole di sicurezza: **[docs/FIREBASE.md](docs/FIREBASE.md)**.
 In breve: crei il database Firestore e un account di servizio, attivi il login Google, imposti il tuo account come
-proprietario nell'app e lanci `deploy_firebase.bat`.
+proprietario nell'app e lanci `deploy_firebase.bat`. Puoi scegliere gratis un indirizzo semplice come
+`https://lister-ai.web.app` invece di quello con l'ID del progetto (`deploy_firebase.bat --site NOME`).
 
 ## Esporta e importa
 

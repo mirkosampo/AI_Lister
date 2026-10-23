@@ -50,8 +50,30 @@ Sostituisci `ID_PROGETTO` con l'ID del tuo progetto.
 
 5. **Pubblicazione**: doppio clic su `deploy_firebase.bat` (oppure `python scripts/deploy_firebase.py ID_PROGETTO`).
    Lo script registra l'app web se manca, genera `firebase-config.js` in `build/hosting/` (escluso da git)
-   e pubblica sito e regole di sicurezza. Il sito sarà su `https://ID_PROGETTO.web.app`.
+   e pubblica sito e regole di sicurezza. Il sito sarà su `https://ID_PROGETTO.web.app`, oppure su un
+   [indirizzo più semplice](#indirizzo-più-semplice-senza-dominio).
    Va rilanciato solo quando cambia il codice dell'interfaccia o delle regole, non per i dati.
+   Rilancialo anche dopo aver attivato il login Google (punto 3): aggiunge l'indirizzo del sito ai domini ammessi al login.
+
+## Indirizzo più semplice (senza dominio)
+
+L'indirizzo predefinito contiene l'ID del progetto (`ai-lister-64331.web.app`). Gratis e senza acquistare un dominio
+puoi aggiungere al progetto un altro sito di Hosting con un nome a scelta, purché libero in tutto Firebase:
+
+```
+firebase hosting:sites:create NOME --project ID_PROGETTO
+deploy_firebase.bat --site NOME
+```
+
+Lo script pubblica l'app su `https://NOME.web.app` e ricorda la scelta in `.firebaserc` (escluso da git), quindi le
+pubblicazioni successive non richiedono più `--site`. Trasforma inoltre l'indirizzo predefinito in un rinvio al nuovo,
+mantenendo il percorso, così i link vecchi continuano a funzionare. Aggiunge infine `NOME.web.app` e
+`NOME.firebaseapp.com` ai domini autorizzati per il login: se il login Google non è ancora attivo te lo segnala,
+e basta rilanciarlo dopo averlo attivato.
+
+Il nome di un sito non si può cambiare e alcuni nomi risultano riservati da altri progetti anche se la pagina appare
+vuota: `hosting:sites:create` lo verifica prima di creare. Per un dominio tuo (es. `ailister.it`) vedi
+*Hosting → Aggiungi dominio personalizzato* nella console: il certificato HTTPS è gratuito, il dominio no.
 
 6. **Avvia l'app locale** (`start.bat`): se trova la chiave del punto 2 si collega da sola. In ⚙ Impostazioni
    la sezione *Sito Firebase* mostra lo stato e l'ultima sincronizzazione.
@@ -121,6 +143,7 @@ Usi tipici:
 |---|---|
 | Il sito mostra *PC offline* | avvia l'app locale (`start.bat`) e controlla in ⚙ Impostazioni che la sezione *Sito Firebase* risulti collegata |
 | *Accedi* dà errore `auth/configuration-not-found` o `auth/operation-not-allowed` | attiva il provider Google (punto 3) |
+| *Accedi* dà errore `auth/unauthorized-domain` | rilancia `deploy_firebase.bat`, che autorizza l'indirizzo del sito, oppure aggiungilo in Authentication → Impostazioni → Domini autorizzati |
 | Dopo il login i pulsanti di modifica non compaiono | l'email del login deve essere quella impostata come proprietario (punto 4); l'app la pubblica entro un minuto |
 | Sincronizzazione: `403 Missing or insufficient permissions` | il ruolo dell'account di servizio può richiedere qualche minuto per attivarsi; altrimenti ripeti il punto 2 |
 | Il lavoro resta *In coda* con il PC acceso | l'app potrebbe essere occupata con una ricerca locale: parte appena finisce |

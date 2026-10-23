@@ -84,7 +84,20 @@ class CloudAgent:
     def status(self) -> dict:
         settings = load_settings()
         return {**self.state, "project": self.project, "owner_email": settings.get("cloud_owner_email"),
-                "hosting_url": f"https://{self.project}.web.app" if self.project else None}
+                "hosting_url": self.hosting_url()}
+
+    def hosting_url(self) -> str | None:
+        """Indirizzo del sito: quello scelto con deploy_firebase.py --site (salvato in .firebaserc) o il predefinito."""
+        if not self.project:
+            return None
+        site = self.project
+        rc = Path(__file__).resolve().parent.parent / ".firebaserc"
+        try:
+            targets = json.loads(rc.read_text(encoding="utf-8"))["targets"][self.project]["hosting"]
+            site = targets["app"][0]
+        except (OSError, KeyError, IndexError, ValueError):
+            pass
+        return f"https://{site}.web.app"
 
     def request_sync(self, reason: str = ""):
         self._pending_reason = reason
