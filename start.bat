@@ -2,6 +2,21 @@
 setlocal
 cd /d "%~dp0"
 
+set PORT=8765
+
+rem Se AI Lister e' gia' acceso (anche una versione precedente) lo chiude, cosi' parte il codice aggiornato.
+rem Va fatto prima di aggiornare le dipendenze: su Windows non si sostituiscono librerie in uso.
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\stop_previous.ps1" -Port %PORT%
+if %errorlevel%==2 (
+    echo Lascio acceso AI Lister com'e'.
+    start "" http://localhost:%PORT%
+    goto :eof
+)
+if %errorlevel%==1 (
+    pause
+    goto :eof
+)
+
 where uv >nul 2>nul
 if %errorlevel%==0 (set USE_UV=1) else (set USE_UV=0)
 
@@ -22,7 +37,6 @@ if %USE_UV%==1 (
     .venv\Scripts\python.exe -m pip install --quiet --disable-pip-version-check -r requirements.txt || goto :error
 )
 
-set PORT=8765
 echo.
 echo  AI Lister in esecuzione su http://localhost:%PORT%
 echo  (chiudi questa finestra o premi CTRL+C per fermarlo)
