@@ -3,7 +3,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .config import DB_PATH
 
@@ -109,6 +109,53 @@ CREATE INDEX IF NOT EXISTS idx_lb_entries_norm ON lb_entries(norm);
 CREATE TABLE IF NOT EXISTS deleted_models (
     slug TEXT PRIMARY KEY,
     deleted_at TEXT NOT NULL
+);
+-- repository GitHub: citati nei video o di tendenza su GitHub
+CREATE TABLE IF NOT EXISTS repos (
+    id INTEGER PRIMARY KEY,
+    full_name TEXT UNIQUE NOT NULL,      -- owner/name in minuscolo (chiave)
+    name TEXT NOT NULL,                  -- owner/name come scritto su GitHub
+    url TEXT NOT NULL,
+    description TEXT,                    -- descrizione originale di GitHub
+    summary TEXT,                        -- riassunto di Claude
+    details TEXT,                        -- descrizione estesa di Claude
+    category TEXT,
+    kind TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    topics TEXT NOT NULL DEFAULT '[]',
+    language TEXT,
+    license TEXT,
+    stars INTEGER,
+    forks INTEGER,
+    open_issues INTEGER,
+    homepage TEXT,
+    created_at_gh TEXT,
+    pushed_at TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    stars_history TEXT NOT NULL DEFAULT '[]',
+    from_video INTEGER NOT NULL DEFAULT 0,
+    from_trending INTEGER NOT NULL DEFAULT 0,
+    trending_topic TEXT,
+    starred INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    first_seen TEXT,
+    updated_at TEXT,
+    gh_fetched_at TEXT
+);
+CREATE TABLE IF NOT EXISTS repo_sources (
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    timestamp_sec INTEGER,
+    PRIMARY KEY (repo_id, video_id)
+);
+CREATE TABLE IF NOT EXISTS deleted_repos (
+    full_name TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL
+);
+-- stato interno (es. ultima ricerca delle tendenze GitHub, repo già scartati)
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 """
 
@@ -310,9 +357,11 @@ def list_models() -> list[dict]:
         d = dict(s)
         by_model.setdefault(d.pop("model_id"), []).append(d)
     rankings = model_rankings()
+    repos = repos_for_models()
     for m in models:
         m["sources"] = by_model.get(m["id"], [])
         m["rankings"] = rankings.get(m["id"], [])
+        m["repos"] = repos.get(m["id"], [])
     return models
 
 
@@ -441,6 +490,216 @@ def delete_model(model_id: int):
         conn().commit()
 
 
+def get_state(key: str, default=None):
+    with _lock:
+        row = conn().execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    return json.loads(row[0]) if row else default
+
+
+def set_state(key: str, value):
+    with _lock:
+        conn().execute("INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+        conn().commit()
+
+
+# ---------- repository GitHub ----------
+
+REPO_JSON_FIELDS = ("tags", "topics", "stars_history")
+REPO_CLAUDE_FIELDS = ("summary", "details", "category", "kind")
+REPO_GH_FIELDS = ("name", "url", "description", "language", "license", "stars", "forks", "open_issues", "homepage",
+                  "created_at_gh", "pushed_at", "archived")
+REPO_EDITABLE = ("starred", "notes", "category", "kind", "summary", "details", "tags")
+
+_GH_URL = re.compile(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", re.I)
+_GH_RESERVED = {"orgs", "topics", "trending", "features", "sponsors", "marketplace", "collections", "about", "settings",
+                "apps", "login", "explore", "pricing", "enterprise", "search", "notifications", "site", "security"}
+
+
+def parse_repo(url_or_name: str) -> str | None:
+    """'https://github.com/Owner/Repo/tree/main' o 'Owner/Repo' -> 'owner/repo' (None se non è un repository)."""
+    s = (url_or_name or "").strip()
+    m = _GH_URL.search(s)
+    if m:
+        owner, name = m.group(1), m.group(2)
+    elif re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", s):
+        owner, name = s.split("/")
+    else:
+        return None
+    name = re.sub(r"\.git$", "", name)
+    if owner.lower() in _GH_RESERVED or not name or name in (".", ".."):
+        return None
+    return f"{owner}/{name}".lower()
+
+
+def _repo_row(r) -> dict:
+    d = dict(r)
+    for f in REPO_JSON_FIELDS:
+        d[f] = json.loads(d[f] or "[]")
+    return d
+
+
+def stars_per_day(repo: dict) -> float | None:
+    """Crescita: dallo storico delle stelle (ultimi 7 giorni) o, per i repo nuovi, stelle / età."""
+    hist = repo.get("stars_history") or []
+    if len(hist) >= 2:
+        last_date, last = hist[-1]
+        window = [h for h in hist if (parse_ts(last_date) - parse_ts(h[0])).days <= 7]
+        first_date, first = window[0]
+        days = (parse_ts(last_date) - parse_ts(first_date)).total_seconds() / 86400
+        if days >= 0.9:
+            return round((last - first) / days, 1)
+    if repo.get("stars") is not None and repo.get("created_at_gh"):
+        age = (datetime.now(timezone.utc) - parse_ts(repo["created_at_gh"])).total_seconds() / 86400
+        if age <= 60:
+            return round(repo["stars"] / max(age, 1), 1)
+    return None
+
+
+def upsert_repo(data: dict, source: str, video_id: str | None = None, timestamp_sec: int | None = None) -> tuple[int | None, bool]:
+    """Inserisce o aggiorna un repository. source: 'video' o 'trending'. Ritorna (id, creato).
+    Un repo eliminato non ricompare dalle tendenze, ma torna se viene citato in un nuovo video."""
+    full = parse_repo(data.get("url") or data.get("full_name") or "")
+    if not full:
+        return None, False
+    with _lock:
+        c = conn()
+        if source == "trending" and c.execute("SELECT 1 FROM deleted_repos WHERE full_name = ?", (full,)).fetchone():
+            return None, False
+        row = c.execute("SELECT * FROM repos WHERE full_name = ?", (full,)).fetchone()
+        flag = "from_video" if source == "video" else "from_trending"
+        if row is None:
+            values = {
+                "full_name": full, "name": data.get("name") or full, "url": f"https://github.com/{data.get('name') or full}",
+                "first_seen": now(), "updated_at": now(), flag: 1,
+                "trending_topic": data.get("trending_topic"),
+                "tags": json.dumps(data.get("tags") or [], ensure_ascii=False),
+                **{f: data.get(f) for f in REPO_CLAUDE_FIELDS},
+            }
+            c.execute(f"INSERT INTO repos ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})", tuple(values.values()))
+            repo_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.execute("DELETE FROM deleted_repos WHERE full_name = ?", (full,))
+            created = True
+        else:
+            repo_id, created = row["id"], False
+            updates = {flag: 1, "updated_at": now()}
+            for f in REPO_CLAUDE_FIELDS:
+                new = data.get(f)
+                # le descrizioni da video (più ricche) sostituiscono quelle da tendenze, non il contrario
+                if new and (not row[f] or (source == "video" and f in ("summary", "details") and len(new) > len(row[f] or ""))):
+                    updates[f] = new
+            tags = _merge_list(json.loads(row["tags"] or "[]"), data.get("tags") or [])
+            updates["tags"] = json.dumps(tags, ensure_ascii=False)
+            if data.get("trending_topic") and not row["trending_topic"]:
+                updates["trending_topic"] = data["trending_topic"]
+            c.execute(f"UPDATE repos SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?", (*updates.values(), repo_id))
+        if video_id:
+            c.execute("INSERT OR REPLACE INTO repo_sources (repo_id, video_id, timestamp_sec) VALUES (?, ?, ?)",
+                      (repo_id, video_id, timestamp_sec))
+        c.commit()
+        return repo_id, created
+
+
+def update_repo_github(full_name: str, gh: dict):
+    """Aggiorna i dati presi da GitHub e aggiunge un punto (uno al giorno) allo storico delle stelle."""
+    full = full_name.lower()
+    with _lock:
+        c = conn()
+        row = c.execute("SELECT stars_history FROM repos WHERE full_name = ?", (full,)).fetchone()
+        if row is None:
+            return
+        hist = json.loads(row["stars_history"] or "[]")
+        today = now()
+        if gh.get("stars") is not None:
+            if hist and hist[-1][0][:10] == today[:10]:
+                hist[-1] = [today, gh["stars"]]
+            else:
+                hist.append([today, gh["stars"]])
+        values = {f: gh.get(f) for f in REPO_GH_FIELDS if f in gh}
+        if "archived" in values:
+            values["archived"] = 1 if values["archived"] else 0
+        values.update(stars_history=json.dumps(hist[-40:]), gh_fetched_at=today)
+        if gh.get("topics"):
+            values["topics"] = json.dumps(gh["topics"], ensure_ascii=False)
+        c.execute(f"UPDATE repos SET {', '.join(f'{k} = ?' for k in values)} WHERE full_name = ?", (*values.values(), full))
+        c.commit()
+
+
+def repos_to_refresh(max_age_hours: int = 24, limit: int = 50) -> list[str]:
+    """Repo mai arricchiti da GitHub o con dati più vecchi di max_age_hours (prima i mai letti)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    with _lock:
+        rows = conn().execute(
+            "SELECT full_name FROM repos WHERE gh_fetched_at IS NULL OR gh_fetched_at < ? "
+            "ORDER BY gh_fetched_at IS NOT NULL, gh_fetched_at LIMIT ?", (cutoff, limit)).fetchall()
+    return [r[0] for r in rows]
+
+
+def known_repos() -> set[str]:
+    with _lock:
+        return {r[0] for r in conn().execute("SELECT full_name FROM repos")} | \
+               {r[0] for r in conn().execute("SELECT full_name FROM deleted_repos")}
+
+
+def list_repos() -> list[dict]:
+    with _lock:
+        c = conn()
+        repos = [_repo_row(r) for r in c.execute("SELECT * FROM repos ORDER BY first_seen DESC, id DESC")]
+        sources = c.execute(
+            """SELECT s.repo_id, s.timestamp_sec, v.id AS video_id, v.title, v.url, v.published_at, v.thumbnail,
+                      ch.name AS channel_name
+               FROM repo_sources s JOIN videos v ON v.id = s.video_id LEFT JOIN channels ch ON ch.id = v.channel_id
+               ORDER BY COALESCE(v.published_at, v.discovered_at) DESC""").fetchall()
+        models = [(r["id"], r["name"], json.loads(r["links"] or "[]")) for r in c.execute("SELECT id, name, links FROM models")]
+    by_repo: dict[int, list] = {}
+    for s in sources:
+        d = dict(s)
+        by_repo.setdefault(d.pop("repo_id"), []).append(d)
+    # modelli che hanno questo repository tra i propri link
+    model_links: dict[str, list] = {}
+    for mid, mname, links in models:
+        for link in links:
+            full = parse_repo(link.get("url") or "")
+            if full:
+                model_links.setdefault(full, []).append({"id": mid, "name": mname})
+    for r in repos:
+        r["sources"] = by_repo.get(r["id"], [])
+        r["models"] = model_links.get(r["full_name"], [])
+        r["stars_per_day"] = stars_per_day(r)
+    return repos
+
+
+def get_repo(repo_id: int) -> dict | None:
+    return next((r for r in list_repos() if r["id"] == repo_id), None)
+
+
+def update_repo(repo_id: int, fields: dict) -> dict | None:
+    updates = {k: (json.dumps(v, ensure_ascii=False) if k == "tags" else v) for k, v in fields.items() if k in REPO_EDITABLE}
+    if updates:
+        updates["updated_at"] = now()
+        with _lock:
+            conn().execute(f"UPDATE repos SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?", (*updates.values(), repo_id))
+            conn().commit()
+    return get_repo(repo_id)
+
+
+def delete_repo(repo_id: int):
+    with _lock:
+        row = conn().execute("SELECT full_name FROM repos WHERE id = ?", (repo_id,)).fetchone()
+        if row:
+            conn().execute("INSERT OR REPLACE INTO deleted_repos (full_name, deleted_at) VALUES (?, ?)", (row[0], now()))
+        conn().execute("DELETE FROM repos WHERE id = ?", (repo_id,))
+        conn().commit()
+
+
+def repos_for_models() -> dict[int, list]:
+    """Per ogni modello, i repository del catalogo collegati tramite i suoi link."""
+    out: dict[int, list] = {}
+    for r in list_repos():
+        for m in r["models"]:
+            out.setdefault(m["id"], []).append({"id": r["id"], "name": r["name"], "stars": r["stars"]})
+    return out
+
+
 # ---------- esportazione / importazione ----------
 #
 # Formato portabile usato da "Esporta"/"Importa", in locale e sul sito Firebase, e dalla sincronizzazione.
@@ -484,7 +743,105 @@ def export_catalog(origin: str = "local", include_rankings: bool = False) -> dic
                       "enabled": bool(ch["enabled"]), "added_at": ch["added_at"], "last_scan_at": ch["last_scan_at"]}
                      for ch in channels.values()],
         "deleted": deleted,
+        **export_repos(include_ids=include_rankings),
     }
+
+
+REPO_EXPORT_FIELDS = ("full_name", "name", "url", "description", "summary", "details", "category", "kind", "tags",
+                      "topics", "language", "license", "stars", "forks", "open_issues", "homepage", "created_at_gh",
+                      "pushed_at", "archived", "stars_history", "from_video", "from_trending", "trending_topic",
+                      "starred", "notes", "first_seen", "updated_at", "gh_fetched_at")
+
+
+def export_repos(include_ids: bool = False) -> dict:
+    with _lock:
+        c = conn()
+        repos = [_repo_row(r) for r in c.execute("SELECT * FROM repos ORDER BY first_seen, id")]
+        sources: dict[int, list] = {}
+        for r in c.execute("SELECT repo_id, video_id, timestamp_sec FROM repo_sources ORDER BY video_id"):
+            sources.setdefault(r["repo_id"], []).append({"video_id": r["video_id"], "timestamp_sec": r["timestamp_sec"]})
+        deleted = {r[0]: r[1] for r in c.execute("SELECT full_name, deleted_at FROM deleted_repos")}
+    out = []
+    for r in repos:
+        item = {f: r.get(f) for f in REPO_EXPORT_FIELDS}
+        item["sources"] = sources.get(r["id"], [])
+        if include_ids:
+            item["id"] = r["id"]
+        out.append(item)
+    return {"repos": out, "deleted_repos": deleted}
+
+
+def _import_repos(c, data: dict, stats: dict):
+    """Unione dei repository: stessa logica dei modelli (vince la modifica più recente, i dati GitHub più freschi)."""
+    local_deleted = {r[0]: r[1] for r in c.execute("SELECT full_name, deleted_at FROM deleted_repos")}
+    for full, deleted_at in (data.get("deleted_repos") or {}).items():
+        row = c.execute("SELECT id, updated_at FROM repos WHERE full_name = ?", (full,)).fetchone()
+        if row and parse_ts(deleted_at) >= parse_ts(row["updated_at"]):
+            c.execute("DELETE FROM repos WHERE id = ?", (row["id"],))
+            stats["repos_deleted"] += 1
+        if parse_ts(deleted_at) > parse_ts(local_deleted.get(full)):
+            c.execute("INSERT OR REPLACE INTO deleted_repos (full_name, deleted_at) VALUES (?, ?)", (full, deleted_at))
+            local_deleted[full] = deleted_at
+    video_ids = {r[0] for r in c.execute("SELECT id FROM videos")}
+    for r in data.get("repos") or []:
+        full = parse_repo(r.get("full_name") or r.get("url") or "")
+        if not full:
+            continue
+        if full in local_deleted and parse_ts(local_deleted[full]) >= parse_ts(r.get("updated_at")):
+            continue
+        row = c.execute("SELECT * FROM repos WHERE full_name = ?", (full,)).fetchone()
+        if row is None:
+            values = {f: r.get(f) for f in REPO_EXPORT_FIELDS}
+            values["full_name"] = full
+            values["name"] = values["name"] or full
+            values["url"] = values["url"] or f"https://github.com/{full}"
+            for f in REPO_JSON_FIELDS:
+                values[f] = json.dumps(values.get(f) or [], ensure_ascii=False)
+            for f in ("archived", "from_video", "from_trending", "starred"):
+                values[f] = 1 if values.get(f) else 0
+            values["first_seen"] = values["first_seen"] or now()
+            values["updated_at"] = values["updated_at"] or now()
+            c.execute(f"INSERT INTO repos ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})", tuple(values.values()))
+            repo_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            stats["repos_added"] += 1
+        else:
+            repo_id = row["id"]
+            newer = parse_ts(r.get("updated_at")) > parse_ts(row["updated_at"])
+            updates = {}
+            for f in REPO_CLAUDE_FIELDS:
+                if not _empty(r.get(f)) and r.get(f) != row[f] and (newer or _empty(row[f])):
+                    updates[f] = r[f]
+            if newer:
+                if bool(r.get("starred")) != bool(row["starred"]):
+                    updates["starred"] = 1 if r.get("starred") else 0
+                if (r.get("notes") or "") != (row["notes"] or ""):
+                    updates["notes"] = r.get("notes")
+            if parse_ts(r.get("gh_fetched_at")) > parse_ts(row["gh_fetched_at"]):
+                for f in REPO_GH_FIELDS + ("gh_fetched_at",):
+                    if r.get(f) is not None and r.get(f) != row[f]:
+                        updates[f] = (1 if r[f] else 0) if f == "archived" else r[f]
+                if r.get("topics"):
+                    updates["topics"] = json.dumps(r["topics"], ensure_ascii=False)
+            for f in ("from_video", "from_trending"):
+                if r.get(f) and not row[f]:
+                    updates[f] = 1
+            tags = _merge_list(json.loads(row["tags"] or "[]"), r.get("tags") or [])
+            if tags != json.loads(row["tags"] or "[]"):
+                updates["tags"] = json.dumps(tags, ensure_ascii=False)
+            hist = {h[0][:10]: h for h in json.loads(row["stars_history"] or "[]")}
+            for h in r.get("stars_history") or []:
+                hist.setdefault(h[0][:10], h)
+            merged = [hist[k] for k in sorted(hist)][-40:]
+            if merged != json.loads(row["stars_history"] or "[]"):
+                updates["stars_history"] = json.dumps(merged)
+            if updates:
+                updates["updated_at"] = r.get("updated_at") if newer else row["updated_at"]
+                c.execute(f"UPDATE repos SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?", (*updates.values(), repo_id))
+                stats["repos_updated"] += 1
+        for s in r.get("sources") or []:
+            if s.get("video_id") in video_ids:
+                c.execute("INSERT OR IGNORE INTO repo_sources (repo_id, video_id, timestamp_sec) VALUES (?, ?, ?)",
+                          (repo_id, s["video_id"], s.get("timestamp_sec")))
 
 
 def _empty(value) -> bool:
@@ -504,6 +861,7 @@ def import_catalog(data: dict) -> dict:
     if int(data.get("version") or 0) > CATALOG_VERSION:
         raise ValueError("Il file proviene da una versione più recente di AI Lister: aggiorna l'app.")
     stats = {"added": 0, "updated": 0, "unchanged": 0, "deleted": 0, "skipped_deleted": 0,
+             "repos_added": 0, "repos_updated": 0, "repos_deleted": 0,
              "videos": 0, "channels": 0}
     with _lock:
         c = conn()
@@ -599,6 +957,7 @@ def import_catalog(data: dict) -> dict:
                 if s.get("video_id") in video_ids:
                     c.execute("INSERT OR IGNORE INTO model_sources (model_id, video_id, timestamp_sec) VALUES (?, ?, ?)",
                               (model_id, s["video_id"], s.get("timestamp_sec")))
+        _import_repos(c, data, stats)
         c.commit()
     match_leaderboards()
     return stats
@@ -722,5 +1081,6 @@ def stats() -> dict:
             "models": c.execute("SELECT COUNT(*) FROM models").fetchone()[0],
             "videos": c.execute("SELECT COUNT(*) FROM videos").fetchone()[0],
             "videos_done": c.execute("SELECT COUNT(*) FROM videos WHERE status = 'done'").fetchone()[0],
+            "repos": c.execute("SELECT COUNT(*) FROM repos").fetchone()[0],
             "channels": c.execute("SELECT COUNT(*) FROM channels").fetchone()[0],
         }

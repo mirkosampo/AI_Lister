@@ -30,6 +30,13 @@ const state = {
   lbOnlyOpen: false,
   lbHighlight: null,
   lbPollTimer: null,
+  // repository GitHub
+  repos: [],
+  repoSort: "recent",
+  repoKinds: new Set(),
+  repoSources: new Set(),
+  selectedRepoId: null,
+  ghPollTimer: null,
 };
 
 // ---------- utilità ----------
@@ -104,26 +111,33 @@ const isNew = (m) => m.first_seen && Date.now() - new Date(m.first_seen) < 3 * 8
 // ---------- caricamento dati ----------
 
 async function loadAll() {
-  const [meta, models, videos, channels, lb] = await Promise.all([
-    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"),
+  const [meta, models, videos, channels, lb, repos] = await Promise.all([
+    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"), api("/api/repos"),
   ]);
-  Object.assign(state, { meta, models, videos, channels, lb });
+  Object.assign(state, { meta, models, videos, channels, lb, repos });
+  fillSort();
   renderSidebar();
   render();
   if (lb.status.running) pollLeaderboards();
+  if (!window.CLOUD) api("/api/github/status").then((s) => { if (s.running) pollGithub(); }).catch(() => {});
 }
 
 async function refreshData() {
-  const [meta, models, videos, channels, lb] = await Promise.all([
-    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"),
+  const [meta, models, videos, channels, lb, repos] = await Promise.all([
+    api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"), api("/api/repos"),
   ]);
-  Object.assign(state, { meta, models, videos, channels, lb });
+  Object.assign(state, { meta, models, videos, channels, lb, repos });
   state.lbEntries = {};
   renderSidebar();
   render();
-  if (state.selectedId) {
+  const editing = $("#drawer").contains(document.activeElement);
+  if (state.selectedId && !editing) {
     const m = state.models.find((x) => x.id === state.selectedId);
-    if (m && !$("#drawer").contains(document.activeElement)) renderDrawer(m);
+    if (m) renderDrawer(m);
+  }
+  if (state.selectedRepoId && !editing) {
+    const r = state.repos.find((x) => x.id === state.selectedRepoId);
+    if (r) renderRepoDrawer(r);
   }
 }
 
@@ -197,8 +211,14 @@ function renderSidebar() {
 
   $("#favToggle").classList.toggle("on", state.starred);
   $$("#views button").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
-  $("#filters").style.display = state.view === "models" ? "" : "none";
-  $("#toolbar").style.display = state.view === "models" ? "" : "none";
+  const listView = state.view === "models" || state.view === "repos";
+  $("#filters").style.display = listView ? "" : "none";
+  $("#toolbar").style.display = listView ? "" : "none";
+  $("#cntRepos").textContent = state.repos.length;
+  $("#btnGithub").style.display = state.view === "repos" ? "" : "none";
+  $("#licTitle").textContent = state.view === "repos" ? "Tipo" : "Licenza";
+  $("#availTitle").textContent = state.view === "repos" ? "Fonte" : "Disponibilità";
+  if (state.view === "repos") renderRepoSidebar();
 }
 
 // ---------- vista modelli ----------
@@ -344,6 +364,278 @@ function renderChannels() {
         <button class="btn small danger owner-only" data-del-ch="${c.id}">Rimuovi</button>
       </div>`).join("")}
     </div>`;
+}
+
+// ---------- repository GitHub ----------
+
+const SORTS = {
+  models: [["recent", "Aggiunti di recente"], ["release", "Data di rilascio"], ["name", "Nome A→Z"],
+    ["params", "Parametri (più grandi)"], ["params_asc", "Parametri (più piccoli)"], ["sources", "Più citati"],
+    ["rank", "Miglior posizione in classifica"]],
+  repos: [["recent", "Aggiunti di recente"], ["growth", "In crescita (stelle/giorno)"], ["stars", "Più stelle"],
+    ["pushed", "Aggiornati di recente"], ["name", "Nome A→Z"]],
+};
+const REPO_SOURCES = { video: "Dai video", trending: "Tendenze GitHub" };
+const LANG_COLORS = { Python: "#3572A5", TypeScript: "#3178c6", JavaScript: "#f1e05a", Rust: "#dea584", Go: "#00ADD8",
+  "C++": "#f34b7d", C: "#555555", "Jupyter Notebook": "#DA5B0B", Java: "#b07219", Swift: "#F05138", Kotlin: "#A97BFF",
+  Shell: "#89e051", "C#": "#178600", Zig: "#ec915c", Dart: "#00B4AB", HTML: "#e34c26", Cuda: "#3A4E3A" };
+const kindLabel = (k) => state.meta?.repo_kinds?.[k] || k || "—";
+
+function fillSort() {
+  const key = state.view === "repos" ? "repos" : "models";
+  const current = key === "repos" ? state.repoSort : state.sort;
+  $("#sort").innerHTML = SORTS[key].map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+  $("#sort").value = SORTS[key].some(([v]) => v === current) ? current : "recent";
+}
+
+function fmtStars(n) {
+  if (n == null) return "—";
+  return n >= 10000 ? `${(n / 1000).toFixed(0)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function repoHaystack(r) {
+  return [r.name, r.description, r.summary, r.details, r.language, r.license, catLabel(r.category), kindLabel(r.kind),
+    ...(r.tags || []), ...(r.topics || []), ...(r.models || []).map((m) => m.name)].join(" ").toLowerCase();
+}
+
+function repoFiltered(ignore = "") {
+  const tokens = state.q.toLowerCase().split(/\s+/).filter(Boolean);
+  return state.repos.filter((r) => {
+    if (state.starred && !r.starred) return false;
+    if (state.videoFilter && !r.sources.some((s) => s.video_id === state.videoFilter)) return false;
+    if (ignore !== "cat" && state.category !== "all" && r.category !== state.category) return false;
+    if (ignore !== "kind" && state.repoKinds.size && !state.repoKinds.has(r.kind || "other")) return false;
+    if (ignore !== "src" && state.repoSources.size
+      && !((state.repoSources.has("video") && r.from_video) || (state.repoSources.has("trending") && r.from_trending))) return false;
+    if (tokens.length) {
+      const h = repoHaystack(r);
+      if (!tokens.every((t) => h.includes(t))) return false;
+    }
+    return true;
+  });
+}
+
+function repoSorted(list) {
+  const by = {
+    recent: (a, b) => (b.first_seen || "").localeCompare(a.first_seen || "") || b.id - a.id,
+    growth: (a, b) => (b.stars_per_day ?? -1) - (a.stars_per_day ?? -1),
+    stars: (a, b) => (b.stars ?? -1) - (a.stars ?? -1),
+    pushed: (a, b) => (b.pushed_at || "").localeCompare(a.pushed_at || ""),
+    name: (a, b) => a.name.localeCompare(b.name, "it"),
+  }[state.repoSort] || (() => 0);
+  return [...list].sort(by);
+}
+
+function renderRepoSidebar() {
+  const forCats = repoFiltered("cat");
+  const counts = {};
+  forCats.forEach((r) => { counts[r.category] = (counts[r.category] || 0) + 1; });
+  const cats = Object.keys(state.meta.categories).filter((c) => counts[c] || state.category === c);
+  $("#catList").innerHTML = [
+    `<li><button data-cat="all" class="${state.category === "all" ? "active" : ""}"><span class="lbl">Tutte</span><span class="count">${forCats.length}</span></button></li>`,
+    ...cats.map((c) => `<li><button data-cat="${c}" class="${state.category === c ? "active" : ""}">
+      <span class="lbl"><span class="dot" style="background:${catColor(c)}"></span>${esc(state.meta.categories[c])}</span>
+      <span class="count">${counts[c] || 0}</span></button></li>`),
+  ].join("");
+  const forKinds = repoFiltered("kind");
+  $("#licChips").innerHTML = Object.entries(state.meta.repo_kinds || {}).map(([k, v]) => {
+    const n = forKinds.filter((r) => (r.kind || "other") === k).length;
+    return n || state.repoKinds.has(k)
+      ? `<button class="chip ${state.repoKinds.has(k) ? "on" : ""}" data-kind="${k}">${esc(v)} <span class="count">${n}</span></button>` : "";
+  }).join("");
+  const forSrc = repoFiltered("src");
+  $("#availChips").innerHTML = Object.entries(REPO_SOURCES).map(([k, v]) => {
+    const n = forSrc.filter((r) => (k === "video" ? r.from_video : r.from_trending)).length;
+    return `<button class="chip ${state.repoSources.has(k) ? "on" : ""}" data-src="${k}">${esc(v)} <span class="count">${n}</span></button>`;
+  }).join("");
+}
+
+function langDot(lang) {
+  return lang ? `<span class="lang"><span class="dot" style="background:${LANG_COLORS[lang] || "var(--text-3)"}"></span>${esc(lang)}</span>` : "";
+}
+
+function repoBadges(r) {
+  return `${catBadge(r)}<span class="badge">${esc(kindLabel(r.kind))}</span>
+    ${r.from_trending ? `<span class="badge trend" title="Tra i repo di IA in tendenza su GitHub${r.trending_topic ? ` (argomento ${esc(r.trending_topic)})` : ""}">🔥 Tendenza</span>` : ""}
+    ${r.from_video ? `<span class="badge" title="Citato in un video">📺 Video</span>` : ""}
+    ${r.archived ? `<span class="badge lic" style="--lic:var(--lic-unreleased)">Archiviato</span>` : ""}`;
+}
+
+function renderRepos() {
+  const list = repoSorted(repoFiltered());
+  const total = state.repos.length;
+  let info = `<b>${list.length}</b> ${list.length === 1 ? "repository" : "repository"}${list.length !== total ? ` su ${total}` : ""}`;
+  if (state.videoFilter) {
+    const v = state.videos.find((x) => x.id === state.videoFilter);
+    info += `<span class="filter-pill">dal video: ${esc((v?.title || "").slice(0, 40))}… <button id="clearVideoFilter">✕</button></span>`;
+  }
+  $("#resultInfo").innerHTML = info;
+  if (!list.length) {
+    return total
+      ? `<div class="empty"><div class="big">🔍</div><h3>Nessun risultato</h3><p>Prova a cambiare ricerca o filtri.</p><button class="btn" id="emptyReset">Azzera filtri</button></div>`
+      : `<div class="empty"><div class="big">🐙</div><h3>Nessun repository ancora</h3>
+        <p>I repository arrivano dai video analizzati (quelli citati nella descrizione o presentati) e dai repo di IA in tendenza su GitHub.</p>
+        <button class="btn primary owner-only" id="emptyGithub">Cerca le tendenze su GitHub</button></div>`;
+  }
+  if (state.layout === "table") {
+    return `<div class="table-wrap"><table><thead><tr>
+      <th></th><th>Repository</th><th>Categoria</th><th>Tipo</th><th class="num">Stelle</th><th class="num">Crescita</th><th>Linguaggio</th><th>Aggiornato</th></tr></thead><tbody>
+      ${list.map((r) => `<tr data-repo="${r.id}">
+        <td><button class="star ${r.starred ? "on" : ""}" data-repo-star="${r.id}">★</button></td>
+        <td><b>${isNew(r) ? '<span class="new-dot"></span>' : ""}${esc(r.name)}</b><span class="card-dev">${esc(r.summary || r.description || "")}</span></td>
+        <td>${catBadge(r)}</td><td>${esc(kindLabel(r.kind))}</td>
+        <td class="num"><b>${fmtStars(r.stars)}</b></td>
+        <td class="num">${r.stars_per_day != null ? `+${fmtStars(Math.round(r.stars_per_day))}/g` : "—"}</td>
+        <td>${langDot(r.language)}</td>
+        <td class="meta-small">${esc(relTime(r.pushed_at))}</td></tr>`).join("")}
+      </tbody></table></div>`;
+  }
+  return `<div class="grid">${list.map((r) => `
+    <article class="card" data-repo="${r.id}" style="--cat-color:${catColor(r.category)}">
+      <div class="card-head">
+        <div>
+          <div class="card-name">${isNew(r) ? '<span class="new-dot" title="Aggiunto negli ultimi 3 giorni"></span>' : ""}${esc(r.name.split("/")[1] || r.name)}</div>
+          <div class="card-dev">${esc(r.name.split("/")[0])}</div>
+        </div>
+        <button class="star ${r.starred ? "on" : ""}" data-repo-star="${r.id}" title="Preferito">★</button>
+      </div>
+      <div class="badges">${repoBadges(r)}</div>
+      <div class="card-summary">${esc(r.summary || r.description || "")}</div>
+      <div class="card-foot">
+        <div class="repo-stats">
+          <span title="Stelle">★ ${fmtStars(r.stars)}</span>
+          ${r.stars_per_day != null ? `<span class="growth" title="Stelle al giorno">+${fmtStars(Math.round(r.stars_per_day))}/g</span>` : ""}
+          ${langDot(r.language)}
+        </div>
+        <span class="meta-small" title="Ultimo aggiornamento del codice">${r.pushed_at ? esc(relTime(r.pushed_at)) : ""}</span>
+      </div>
+    </article>`).join("")}</div>`;
+}
+
+function renderRepoDrawer(r) {
+  const meta = state.meta;
+  const hist = r.stars_history || [];
+  $("#drawer").innerHTML = `
+    <div class="d-head">
+      <div>
+        <h2>${esc(r.name)}</h2>
+        <div class="card-dev"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url.replace(/^https?:\/\//, ""))} ↗</a>
+          ${r.homepage ? ` · <a href="${esc(r.homepage)}" target="_blank" rel="noopener">sito ↗</a>` : ""}</div>
+      </div>
+      <div class="d-actions">
+        <button class="icon-btn star ${r.starred ? "on" : ""}" data-repo-star="${r.id}" title="Preferito">★</button>
+        <button class="icon-btn" id="drawerClose" title="Chiudi (Esc)">✕</button>
+      </div>
+    </div>
+    <div class="badges">${repoBadges(r)}${r.license ? `<span class="badge">${esc(r.license)}</span>` : ""}</div>
+    ${r.summary ? `<p class="d-summary">${esc(r.summary)}</p>` : ""}
+    ${r.details ? `<p class="d-desc">${esc(r.details)}</p>` : ""}
+    ${r.description ? `<p class="d-desc muted" title="Descrizione su GitHub">“${esc(r.description)}”</p>` : ""}
+
+    <div class="d-section"><h5>Su GitHub</h5>
+      <div class="specs">
+        ${spec("Stelle", r.stars != null ? r.stars.toLocaleString("it-IT") : "")}
+        ${spec("Crescita", r.stars_per_day != null ? `+${r.stars_per_day.toLocaleString("it-IT")} stelle/giorno` : "")}
+        ${spec("Fork", r.forks != null ? r.forks.toLocaleString("it-IT") : "")}${spec("Issue aperte", r.open_issues != null ? String(r.open_issues) : "")}
+        ${spec("Linguaggio", r.language)}${spec("Licenza", r.license)}
+        ${spec("Creato", fmtDate(r.created_at_gh))}${spec("Ultimo commit", r.pushed_at ? `${fmtDate(r.pushed_at)} (${relTime(r.pushed_at)})` : "")}
+      </div>
+      ${hist.length >= 2 ? `<div class="spark-wrap" title="Andamento delle stelle">${sparkline(hist)}</div>` : ""}
+      <div class="meta-small" style="margin-top:6px">${r.gh_fetched_at ? `Dati GitHub aggiornati ${esc(relTime(r.gh_fetched_at))}` : "Dati GitHub non ancora letti"}</div>
+    </div>
+
+    ${r.models?.length ? `<div class="d-section"><h5>Modelli collegati</h5><div class="tags">
+      ${r.models.map((m) => `<button class="tag" data-open-model="${m.id}">${esc(m.name)}</button>`).join("")}</div></div>` : ""}
+
+    ${(r.topics?.length || r.tags?.length) ? `<div class="d-section"><h5>Argomenti</h5><div class="tags">
+      ${[...new Set([...(r.topics || []), ...(r.tags || [])])].map((t) => `<span class="tag" data-tag="${esc(t)}">${esc(t)}</span>`).join("")}</div></div>` : ""}
+
+    <div class="d-section"><h5>Visto in</h5>
+      ${r.sources.length ? r.sources.map((s) => `
+        <a class="source" href="${esc(s.url)}${s.timestamp_sec != null ? `&t=${s.timestamp_sec}s` : ""}" target="_blank" rel="noopener">
+          <img loading="lazy" src="${esc(s.thumbnail || `https://i.ytimg.com/vi/${s.video_id}/hqdefault.jpg`)}" alt="">
+          <div><div class="st">${esc(s.title || s.video_id)}</div>
+          <div class="ss">${esc(s.channel_name || "")}${s.published_at ? " · " + esc(fmtDate(s.published_at)) : ""}${s.timestamp_sec != null ? " · ▶ " + fmtTs(s.timestamp_sec) : ""}</div></div>
+        </a>`).join("") : `<div class="muted">${r.from_trending ? `Trovato tra le tendenze di GitHub${r.trending_topic ? ` (argomento «${esc(r.trending_topic)}»)` : ""}.` : "Aggiunto da un'importazione."}</div>`}
+    </div>
+
+    <div class="d-section owner-only"><h5>Correggi classificazione</h5>
+      <div class="edit-row">
+        <label>Categoria<select data-repo-edit="category">${Object.entries(meta.categories).map(([k, v]) => `<option value="${k}" ${k === r.category ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+        <label>Tipo<select data-repo-edit="kind">${Object.entries(meta.repo_kinds || {}).map(([k, v]) => `<option value="${k}" ${k === r.kind ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+      </div>
+    </div>
+
+    <div class="d-section owner-only"><h5>Note personali</h5>
+      <textarea id="repoNotes" rows="3" placeholder="Appunti, prove fatte, impressioni…">${esc(r.notes || "")}</textarea>
+    </div>
+
+    <div class="d-foot">
+      <span>Aggiunto ${esc(relTime(r.first_seen))}</span>
+      <button class="btn small danger owner-only" data-repo-delete="${r.id}">Elimina</button>
+    </div>`;
+}
+
+function sparkline(hist) {
+  const pts = hist.slice(-30);
+  const vals = pts.map((h) => h[1]);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const w = 520, h = 48;
+  const xy = pts.map((p, i) => [(i / (pts.length - 1)) * w, h - 4 - ((p[1] - min) / (max - min || 1)) * (h - 8)]);
+  const d = xy.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${d}"/></svg>
+    <div class="spark-legend"><span>${esc(fmtDate(pts[0][0]))}: ${fmtStars(pts[0][1])}</span><span>${esc(fmtDate(pts[pts.length - 1][0]))}: ${fmtStars(pts[pts.length - 1][1])}</span></div>`;
+}
+
+function openRepoDrawer(id) {
+  const r = state.repos.find((x) => x.id === id);
+  if (!r) return;
+  state.selectedId = null;
+  state.selectedRepoId = id;
+  renderRepoDrawer(r);
+  $("#drawer").classList.add("open");
+  $("#drawer").setAttribute("aria-hidden", "false");
+  $("#drawerBackdrop").classList.add("open");
+  $("#drawer").scrollTop = 0;
+}
+
+async function patchRepo(id, fields) {
+  const updated = await api(`/api/repos/${id}`, { method: "PATCH", body: fields });
+  const i = state.repos.findIndex((r) => r.id === id);
+  if (i >= 0) state.repos[i] = updated;
+  return updated;
+}
+
+async function toggleRepoStar(id) {
+  const r = state.repos.find((x) => x.id === id);
+  const updated = await patchRepo(id, { starred: r.starred ? 0 : 1 });
+  renderSidebar();
+  render();
+  if (state.selectedRepoId === id) renderRepoDrawer(updated);
+}
+
+async function startGithub() {
+  try {
+    await api("/api/github/refresh", { method: "POST" });
+  } catch (e) { toast(e.message); return; }
+  toast(window.CLOUD ? "Richiesta inviata: il PC cercherà le tendenze su GitHub" : "Cerco i repository di tendenza su GitHub…");
+  pollGithub();
+}
+
+async function pollGithub() {
+  clearTimeout(state.ghPollTimer);
+  let s;
+  try { s = await api("/api/github/status"); } catch { return; }
+  const btn = $("#btnGithub");
+  btn.disabled = s.running;
+  btn.innerHTML = s.running ? '<span class="spinner tiny"></span> GitHub…' : "⟳ GitHub";
+  if (s.running) { state.ghPollTimer = setTimeout(pollGithub, 2500); return; }
+  if (s.finished_at) {
+    await refreshData();
+    const added = (s.log || []).filter((l) => l.msg.trim().startsWith("＋")).length;
+    const err = (s.log || []).find((l) => l.level === "error");
+    toast(err ? `GitHub: ${err.msg}` : `GitHub aggiornato: ${added} repository nuovi`);
+  }
 }
 
 // ---------- vista classifiche ----------
@@ -518,6 +810,7 @@ function render() {
   const html = state.view === "videos" ? renderVideos()
     : state.view === "channels" ? renderChannels()
     : state.view === "leaderboards" ? renderLeaderboards()
+    : state.view === "repos" ? renderRepos()
     : renderModels();
   $("#content").innerHTML = html;
 }
@@ -568,6 +861,9 @@ function renderDrawer(m) {
           <span class="rr-score">${fmtScore(r.score, r.unit)}<span class="rr-sub">${esc(r.metric || "")}</span></span>
         </button>`).join("")}</div></div>` : ""}
 
+    ${m.repos?.length ? `<div class="d-section"><h5>Repository</h5><div class="tags">
+      ${m.repos.map((r) => `<button class="tag" data-open-repo="${r.id}">🐙 ${esc(r.name)}${r.stars != null ? ` · ★ ${fmtStars(r.stars)}` : ""}</button>`).join("")}</div></div>` : ""}
+
     ${m.key_features?.length ? `<div class="d-section"><h5>Caratteristiche principali</h5>
       <ul class="features">${m.key_features.map((f) => `<li>${esc(f)}</li>`).join("")}</ul></div>` : ""}
 
@@ -612,6 +908,7 @@ function openDrawer(id) {
   const m = state.models.find((x) => x.id === id);
   if (!m) return;
   state.selectedId = id;
+  state.selectedRepoId = null;
   renderDrawer(m);
   $("#drawer").classList.add("open");
   $("#drawer").setAttribute("aria-hidden", "false");
@@ -621,6 +918,7 @@ function openDrawer(id) {
 
 function closeDrawer() {
   state.selectedId = null;
+  state.selectedRepoId = null;
   $("#drawer").classList.remove("open");
   $("#drawer").setAttribute("aria-hidden", "true");
   $("#drawerBackdrop").classList.remove("open");
@@ -680,7 +978,7 @@ async function pollScan() {
   $("#btnCancel").style.display = s.running ? "" : "none";
   $("#btnScan").disabled = s.running;
   $("#scanTitle").textContent = s.running
-    ? (s.phase === "queued" ? "In coda" : s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
+    ? (s.phase === "queued" ? "In coda" : s.phase === "github" ? "GitHub: repo di tendenza e dati" : s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
     : "Ricerca completata";
   $("#scanSub").textContent = s.running
     ? (s.current || "") + ` · ${s.added} nuovi modelli`
@@ -758,6 +1056,11 @@ async function openSettings() {
          : "Login OAuth standard. Se compaiono errori di rinnovo del token, vedi «Token di lunga durata» nel README."}</div>`;
   f.elements.artificial_analysis_api_key.value = "";
   f.elements.artificial_analysis_api_key.placeholder = s.aa_key_set ? "•••••••• (impostata, lascia vuoto per non cambiarla)" : "Incolla la chiave";
+  f.elements.github_token.value = "";
+  f.elements.github_token.placeholder = s.github_token_set ? "•••••••• (impostato, lascia vuoto per non cambiarlo)" : "Incolla il token";
+  $("#ghTokenHint").innerHTML = s.github_token_set
+    ? `Salvato in <code>.env</code>. <a href="#" id="ghTokenRemove">Rimuovi token</a>`
+    : `Un <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">token a grana fine</a> senza alcun permesso basta.`;
   $("#aaKeyHint").innerHTML = s.aa_key_set
     ? `Salvata in <code>.env</code>, non lascia mai il tuo computer. <a href="#" id="aaKeyRemove">Rimuovi chiave</a>`
     : `Sblocca Intelligence Index, prezzi, velocità e le arene di Artificial Analysis. <a href="https://artificialanalysis.ai/documentation" target="_blank" rel="noopener">Come ottenerla</a>`;
@@ -770,7 +1073,7 @@ function bindEvents() {
   $("#search").addEventListener("input", (e) => {
     state.q = e.target.value;
     // nelle classifiche la ricerca filtra la tabella; altrove porta al catalogo
-    if (state.view !== "models" && state.view !== "leaderboards") state.view = "models";
+    if (!["models", "repos", "leaderboards"].includes(state.view)) state.view = "models";
     renderSidebar();
     render();
   });
@@ -787,6 +1090,7 @@ function bindEvents() {
     const b = e.target.closest("button[data-view]");
     if (!b) return;
     state.view = b.dataset.view;
+    fillSort();
     renderSidebar();
     render();
   });
@@ -800,6 +1104,14 @@ function bindEvents() {
   });
 
   $("#licChips").addEventListener("click", (e) => {
+    const kind = e.target.closest("[data-kind]");
+    if (kind) {
+      const k = kind.dataset.kind;
+      state.repoKinds.has(k) ? state.repoKinds.delete(k) : state.repoKinds.add(k);
+      renderSidebar();
+      render();
+      return;
+    }
     const b = e.target.closest("[data-lic]");
     if (!b) return;
     const k = b.dataset.lic;
@@ -809,6 +1121,14 @@ function bindEvents() {
   });
 
   $("#availChips").addEventListener("click", (e) => {
+    const src = e.target.closest("[data-src]");
+    if (src) {
+      const k = src.dataset.src;
+      state.repoSources.has(k) ? state.repoSources.delete(k) : state.repoSources.add(k);
+      renderSidebar();
+      render();
+      return;
+    }
     const b = e.target.closest("[data-avail]");
     if (!b) return;
     const k = b.dataset.avail;
@@ -827,6 +1147,8 @@ function bindEvents() {
     Object.assign(state, { category: "all", starred: false, videoFilter: null, q: "" });
     state.licenses.clear();
     state.avail.clear();
+    state.repoKinds.clear();
+    state.repoSources.clear();
     $("#search").value = "";
     renderSidebar();
     render();
@@ -860,12 +1182,18 @@ function bindEvents() {
       + `il ${fmtDate(data.exported_at)}).\n\nNiente viene cancellato senza motivo: per ogni modello vince la versione modificata più di recente.`)) return;
     try {
       const r = await api("/api/import", { method: "POST", body: data });
-      toast(`Importazione completata: ${r.added} nuovi, ${r.updated} aggiornati, ${r.deleted} eliminati, ${r.unchanged} invariati`);
+      toast(`Importazione completata: ${r.added} modelli nuovi, ${r.updated} aggiornati, ${r.deleted} eliminati`
+        + ` · ${r.repos_added || 0} repository nuovi, ${r.repos_updated || 0} aggiornati`);
       refreshData();
     } catch (err) { toast(err.message); }
   });
 
-  $("#sort").addEventListener("change", (e) => { state.sort = e.target.value; store("sort", state.sort); render(); });
+  $("#sort").addEventListener("change", (e) => {
+    if (state.view === "repos") { state.repoSort = e.target.value; store("repoSort", state.repoSort); }
+    else { state.sort = e.target.value; store("sort", state.sort); }
+    render();
+  });
+  $("#btnGithub").addEventListener("click", startGithub);
   $("#layoutSeg").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-layout]");
     if (!b) return;
@@ -880,9 +1208,14 @@ function bindEvents() {
     if (t.closest("[data-stop]")) return;
     const star = t.closest("[data-star]");
     if (star) { e.stopPropagation(); toggleStar(+star.dataset.star); return; }
+    const rstar = t.closest("[data-repo-star]");
+    if (rstar) { e.stopPropagation(); toggleRepoStar(+rstar.dataset.repoStar); return; }
     const card = t.closest("[data-id]");
     if (card) { openDrawer(+card.dataset.id); return; }
+    const repoCard = t.closest("[data-repo]");
+    if (repoCard) { openRepoDrawer(+repoCard.dataset.repo); return; }
     if (t.closest("#emptyScan")) { startScan(); return; }
+    if (t.closest("#emptyGithub")) { startGithub(); return; }
     if (t.closest("#emptyReset")) { resetFilters(); return; }
     if (t.closest("#clearVideoFilter")) { state.videoFilter = null; renderSidebar(); render(); return; }
 
@@ -948,6 +1281,21 @@ function bindEvents() {
     if (ob) return openBoard(ob.dataset.openBoard, state.selectedId);
     const star = t.closest("[data-star]");
     if (star) return toggleStar(+star.dataset.star);
+    const rstar = t.closest("[data-repo-star]");
+    if (rstar) return toggleRepoStar(+rstar.dataset.repoStar);
+    const orepo = t.closest("[data-open-repo]");
+    if (orepo) return openRepoDrawer(+orepo.dataset.openRepo);
+    const omodel = t.closest("[data-open-model]");
+    if (omodel) return openDrawer(+omodel.dataset.openModel);
+    const rdel = t.closest("[data-repo-delete]");
+    if (rdel) {
+      if (confirm("Eliminare questo repository? Non ricomparirà dalle tendenze di GitHub (tornerà solo se citato in un nuovo video).")) {
+        await api(`/api/repos/${rdel.dataset.repoDelete}`, { method: "DELETE" });
+        closeDrawer();
+        refreshData();
+      }
+      return;
+    }
     const tag = t.closest("[data-tag]");
     if (tag) {
       state.q = tag.dataset.tag;
@@ -965,6 +1313,15 @@ function bindEvents() {
     }
   });
   $("#drawer").addEventListener("change", async (e) => {
+    const rsel = e.target.closest("[data-repo-edit]");
+    if (rsel && state.selectedRepoId) {
+      const updated = await patchRepo(state.selectedRepoId, { [rsel.dataset.repoEdit]: rsel.value });
+      renderRepoDrawer(updated);
+      renderSidebar();
+      render();
+      toast("Salvato");
+      return;
+    }
     const sel = e.target.closest("[data-edit]");
     if (!sel || !state.selectedId) return;
     const updated = await patchModel(state.selectedId, { [sel.dataset.edit]: sel.value });
@@ -974,6 +1331,13 @@ function bindEvents() {
     toast("Salvato");
   });
   $("#drawer").addEventListener("focusout", async (e) => {
+    if (e.target.id === "repoNotes" && state.selectedRepoId) {
+      const r = state.repos.find((x) => x.id === state.selectedRepoId);
+      if ((r.notes || "") === e.target.value) return;
+      await patchRepo(state.selectedRepoId, { notes: e.target.value });
+      toast("Note salvate");
+      return;
+    }
     if (e.target.id !== "notes" || !state.selectedId) return;
     const m = state.models.find((x) => x.id === state.selectedId);
     if ((m.notes || "") === e.target.value) return;
@@ -1003,7 +1367,7 @@ function bindEvents() {
     for (const el of f.elements) {
       if (!el.name) continue;
       // campo chiave vuoto = lascia invariata quella salvata
-      if (el.name === "artificial_analysis_api_key" && !el.value.trim()) continue;
+      if ((el.name === "artificial_analysis_api_key" || el.name === "github_token") && !el.value.trim()) continue;
       body[el.name] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value;
     }
     const saved = await api("/api/settings", { method: "PUT", body });
@@ -1025,6 +1389,14 @@ function bindEvents() {
       } catch (err) { toast(err.message); }
       renderCloudBox();
       refreshData();
+      return;
+    }
+    if (e.target.id === "ghTokenRemove") {
+      e.preventDefault();
+      if (!confirm("Rimuovere il token GitHub?")) return;
+      await api("/api/settings", { method: "PUT", body: { github_token: "" } });
+      $("#dlgSettings").close();
+      toast("Token rimosso");
       return;
     }
     if (e.target.id !== "aaKeyRemove") return;
@@ -1053,8 +1425,9 @@ function bindEvents() {
   const theme = recall("theme", null);
   if (theme) document.documentElement.dataset.theme = theme;
   state.sort = recall("sort", "recent");
+  state.repoSort = recall("repoSort", "recent");
   state.layout = recall("layout", "grid");
-  $("#sort").value = state.sort;
+  fillSort();
   $$("#layoutSeg button").forEach((b) => b.classList.toggle("active", b.dataset.layout === state.layout));
   bindEvents();
   if (window.FIREBASE_CONFIG) {

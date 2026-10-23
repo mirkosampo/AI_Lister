@@ -12,7 +12,7 @@ STATIC_DIR = ROOT / "static"
 # File locale (escluso da git) per i segreti: token di `claude setup-token`, chiave Artificial Analysis
 ENV_PATH = ROOT / ".env"
 # Segreti che si possono impostare dalla GUI: non vengono mai restituiti al browser
-SECRET_KEYS = ("CLAUDE_CODE_OAUTH_TOKEN", "ARTIFICIAL_ANALYSIS_API_KEY")
+SECRET_KEYS = ("CLAUDE_CODE_OAUTH_TOKEN", "ARTIFICIAL_ANALYSIS_API_KEY", "GITHUB_TOKEN")
 
 DEFAULTS = {
     # Percorso di claude.exe; vuoto = rilevamento automatico (PATH, poi app desktop)
@@ -31,6 +31,12 @@ DEFAULTS = {
     "timeout_sec": 1800,
     # Account Google che può modificare il sito su Firebase (scritto in Firestore, mai nel codice)
     "cloud_owner_email": "",
+    # Repository GitHub di tendenza: inclusi nelle ricerche (al massimo ogni 12 ore)
+    "github_trending": True,
+    "github_topics": "llm, ai-agents, generative-ai, diffusion-models, text-to-speech, text-to-video, mcp, rag",
+    "github_days": 14,
+    "github_min_stars": 100,
+    "github_per_topic": 10,
 }
 
 _lock = threading.Lock()

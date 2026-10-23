@@ -5,7 +5,7 @@ import time
 import traceback
 from datetime import datetime
 
-from . import analyzer, db, youtube
+from . import analyzer, db, github, youtube
 from .config import load_settings
 
 
@@ -25,7 +25,7 @@ class Scanner:
     def _idle_state() -> dict:
         return {
             "running": False, "phase": "idle", "current": None, "done": 0, "total": 0,
-            "added": 0, "updated": 0, "errors": 0, "started_at": None, "finished_at": None,
+            "added": 0, "updated": 0, "repos_added": 0, "errors": 0, "started_at": None, "finished_at": None,
         }
 
     # ---------- API pubblica ----------
@@ -80,6 +80,14 @@ class Scanner:
                 self._process(video, settings)
                 self.state["done"] += 1
                 db.checkpoint()
+            # passo GitHub: dati dei repo citati e, al massimo ogni 12 ore, repo di IA in tendenza
+            if not self._cancel.is_set() and not video_ids:
+                self.state.update(phase="github", current="GitHub")
+                stats = github.update(self._log, self._set_proc, cancel=self._cancel)
+                self.state["repos_added"] += stats.get("relevant", 0)
+                db.checkpoint()
+            elif video_ids:
+                github.enrich(github.GitHub(), self._log)
         except Exception as exc:  # noqa: BLE001
             self._log(f"Errore inatteso: {exc}", "error")
             self._log(traceback.format_exc(), "debug")
@@ -94,7 +102,7 @@ class Scanner:
                 self._log("Ricerca annullata.", "warn")
             self._log(
                 f"🏁 Fine: {s['done']}/{s['total']} video · {s['added']} modelli nuovi · "
-                f"{s['updated']} aggiornati · {s['errors']} errori",
+                f"{s['updated']} aggiornati · {s['repos_added']} repository nuovi · {s['errors']} errori",
                 "success",
             )
             s.update(running=False, phase="idle", current=None, finished_at=datetime.now().isoformat(timespec="seconds"))
@@ -213,9 +221,22 @@ class Scanner:
                 self._log(f"  ↻ {m['name']} (aggiornato)")
         self.state["added"] += added
         self.state["updated"] += updated
+        repos_new = repos_total = 0
+        for r in result.get("repos") or []:
+            try:
+                repo_id, created = db.upsert_repo(r, "video", vid, r.get("timestamp_sec"))
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"  ⚠ repo scartato ({r.get('url')}): {exc}", "warn")
+                continue
+            if repo_id:
+                repos_total += 1
+                repos_new += created
+                if created:
+                    self._log(f"  🐙 {db.parse_repo(r['url'])}  [{r.get('kind')}]", "success")
+        self.state["repos_added"] += repos_new
         db.update_video(vid, status="done", processed_at=db.now(), models_found=added + updated,
                         summary=result.get("video_summary"))
-        self._log(f"  ✔ {added} nuovi, {updated} aggiornati", "success")
+        self._log(f"  ✔ {added} modelli nuovi, {updated} aggiornati · {repos_total} repository ({repos_new} nuovi)", "success")
 
 
 scanner = Scanner()

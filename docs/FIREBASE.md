@@ -95,7 +95,8 @@ segna il lavoro `done` o `error`. Dal sito si può chiedere l'annullamento (`can
 Se il PC è spento il lavoro resta in coda e parte alla prossima accensione dell'app. Se l'app è già occupata
 con una ricerca avviata in locale, il lavoro aspetta che finisca.
 
-Tipi di lavoro: `scan` (ricerca sui canali), `videos` (video specifici), `leaderboards` (aggiorna le classifiche),
+Tipi di lavoro: `scan` (ricerca sui canali, compresi i repo GitHub), `videos` (video specifici),
+`github` (repo di tendenza e dati GitHub), `leaderboards` (aggiorna le classifiche),
 `add_channel`, `update_channel`, `delete_channel`.
 
 **PC online.** Ogni minuto l'app scrive `agent/status` (`last_seen`, `busy`, `claude_ready`); il sito mostra
@@ -106,10 +107,11 @@ Tipi di lavoro: `scan` (ricerca sui canali), `videos` (video specifici), `leader
 | Documento | Contenuto | Lettura | Scrittura |
 |---|---|---|---|
 | `catalog/chunk-00` … `chunk-15` | `{models: {slug: modello}}`; il documento si sceglie con `crc32(slug) % 16`. Ogni modello include `id` locale e `rankings` | tutti | proprietario, app |
+| `catalog/repos-00` … `repos-07` | `{repos: {owner/repo: repository}}` (`crc32(full_name) % 8`); `stars_history` è salvato come `[{d, s}]` perché Firestore non ammette liste annidate | tutti | proprietario, app |
 | `catalog/videos` | `{videos: [...]}` | tutti | proprietario, app |
 | `catalog/channels` | `{channels: [...]}` | tutti | proprietario, app |
-| `catalog/deleted` | `{deleted: {slug: data}}`: modelli eliminati | tutti | proprietario, app |
-| `private/notes` | `{notes: {slug: testo}}`: note personali | proprietario | proprietario, app |
+| `catalog/deleted` | `{deleted: {slug: data}, deleted_repos: {owner/repo: data}}`: elementi eliminati | tutti | proprietario, app |
+| `private/notes` | `{notes: {slug: testo}, repo_notes: {owner/repo: testo}}`: note personali | proprietario | proprietario, app |
 | `meta/app` | etichette di categorie/licenze/link, statistiche | tutti | app |
 | `leaderboards/_index` | elenco delle classifiche, directory, fonti | tutti | app |
 | `leaderboards/{id}` | `{entries: [...]}` di una classifica | tutti | app |

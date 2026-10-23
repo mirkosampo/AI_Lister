@@ -95,6 +95,25 @@ del nome o di un alias di un modello del catalogo. Ai modelli senza corrisponden
 
 `db.model_rankings()` restituisce per ogni modello la miglior posizione in ogni classifica; `/api/models` la include nel campo `rankings`.
 
+## Repository GitHub (`app/github.py`)
+
+- **Dai video**: `OUTPUT_SCHEMA` dell'analisi ha un campo `repos` (`url`, `category`, `kind`, `summary`, `details`, `tags`,
+  `timestamp_sec`); lo scanner li salva con `db.upsert_repo(..., "video", video_id)`.
+- **Tendenze**: `trending()` esegue per ogni argomento di `github_topics` la ricerca
+  `topic:X created:>=OGGI-github_days stars:>=github_min_stars` ordinata per stelle (`github_per_topic` risultati).
+  I candidati già noti aggiornano solo i numeri; quelli nuovi vanno a Claude a blocchi di 40 con `TRENDING_SCHEMA`
+  (`relevant`, categoria, tipo, testi). La chiamata non usa il web e ha effort basso. I non pertinenti finiscono in `app_state.github_ignored`
+  e non vengono rivalutati.
+- **Arricchimento**: `enrich()` legge `GET /repos/{owner}/{repo}` per i repo mai letti o con dati più vecchi di 24 ore,
+  fermandosi quando restano poche richieste orarie (`X-RateLimit-Remaining`). `db.update_repo_github()` aggiunge un
+  punto al giorno a `stars_history`, da cui `db.stars_per_day()` calcola la crescita: ultimi 7 giorni, oppure stelle/età
+  per i repo con meno di 60 giorni.
+- **Quando**: alla fine di ogni ricerca sui canali (`github.update()`: arricchimento e, se sono passate 12 ore, tendenze);
+  dopo un'analisi di video specifici solo l'arricchimento; a mano con `POST /api/github/refresh` (`github.refresher`,
+  oppure il lavoro `github` dal sito). Una ricerca e un aggiornamento GitHub non girano mai insieme.
+- **Collegamento ai modelli**: `db.list_repos()` associa a ogni repo i modelli che lo hanno tra i propri `links`
+  (`db.parse_repo` normalizza gli URL in `owner/repo`), e `list_models()` restituisce il collegamento inverso in `repos`.
+
 ## Formato di esportazione
 
 `db.export_catalog()` e `db.import_catalog()` definiscono il formato portabile usato da *Esporta*/*Importa*
@@ -108,9 +127,18 @@ del nome o di un alias di un modello del catalogo. Ai modelli senza corrisponden
                  "sources": [{ "video_id": "…", "timestamp_sec": 125 }] }],
   "videos":   [{ "id": "…", "channel_handle": "@…", "title": "…", "status": "done", "…": "…" }],
   "channels": [{ "handle": "@…", "name": "…", "url": "…", "enabled": true }],
-  "deleted":  { "slug": "data di eliminazione" }
+  "deleted":  { "slug": "data di eliminazione" },
+  "repos":    [{ "full_name": "owner/repo", "name": "Owner/Repo", "url": "…", "summary": "…", "category": "…",
+                 "kind": "tool", "stars": 1234, "stars_history": [["data", 1200], ["data", 1234]],
+                 "from_video": 1, "from_trending": 0, "starred": 0, "notes": "…", "updated_at": "…",
+                 "gh_fetched_at": "…", "sources": [{ "video_id": "…", "timestamp_sec": 60 }], "…": "…" }],
+  "deleted_repos": { "owner/repo": "data di eliminazione" }
 }
 ```
+
+`repos` e `deleted_repos` sono facoltativi, quindi i file esportati prima dei repository restano validi. Per i repository
+valgono le stesse regole dei modelli; in più i dati di GitHub vengono presi dalla copia con `gh_fetched_at` più recente
+e gli storici delle stelle si uniscono giorno per giorno.
 
 Regole di unione, identiche in Python (`import_catalog`) e in JavaScript (`importCatalog` in `static/cloud.js`):
 
@@ -151,6 +179,10 @@ SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la co
 | `lb_boards` | una riga per classifica: fonte, nome, categoria, metrica, unità, attribuzione, data dei dati, numero di voci |
 | `lb_entries` | voci delle classifiche con `norm` (nome normalizzato) e `model_id` (collegamento al catalogo, `NULL` se assente) |
 | `deleted_models` | slug e data dei modelli eliminati, per propagare le eliminazioni a importazioni e sincronizzazione |
+| `repos` | repository GitHub: chiave `full_name` (`owner/repo` minuscolo), testi di Claude, dati GitHub, `stars_history`, fonti (`from_video`, `from_trending`), preferito e note |
+| `repo_sources` | relazione repository ↔ video con `timestamp_sec` |
+| `deleted_repos` | repository eliminati |
+| `app_state` | stato interno in JSON: `github_trending_at`, `github_ignored` |
 
 Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti `processing` tornano `new`.
 
@@ -175,6 +207,10 @@ Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti
 | DELETE | `/api/models/{id}` | elimina un modello |
 | GET | `/api/export` | catalogo completo nel [formato di esportazione](#formato-di-esportazione) (download) |
 | POST | `/api/import` | unisce un catalogo esportato; restituisce `added`, `updated`, `unchanged`, `deleted`, `skipped_deleted`, `videos`, `channels` |
+| GET | `/api/repos` | tutti i repository con fonti, modelli collegati e `stars_per_day` |
+| PATCH / DELETE | `/api/repos/{id}` | modifica (`starred`, `notes`, `category`, `kind`, …) / elimina |
+| POST | `/api/github/refresh` | tendenze e dati GitHub subito (`409` se c'è una ricerca in corso) |
+| GET | `/api/github/status` | stato e log dell'aggiornamento GitHub, data delle ultime tendenze |
 | GET | `/api/cloud/status` | collegamento a Firebase: progetto, ultima sincronizzazione, errori, lavoro in corso |
 | POST | `/api/cloud/sync` | sincronizza subito con Firestore |
 | GET / POST | `/api/channels` | elenco / aggiunta (`{"value": "@canale"}` o URL) |

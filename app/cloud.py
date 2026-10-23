@@ -17,7 +17,7 @@ import traceback
 import zlib
 from pathlib import Path
 
-from . import analyzer, db, leaderboards, taxonomy, youtube
+from . import analyzer, db, github, leaderboards, taxonomy, youtube
 from .config import DATA_DIR, load_settings
 from .leaderboards import refresher
 from .scanner import scanner
@@ -30,13 +30,29 @@ JOB_POLL_SEC = 60                # ripiego se l'ascolto in tempo reale si interr
 APP_VERSION = 1
 
 
+REPO_CHUNKS = 8                  # repository GitHub: documenti repos-00 … repos-07
+
+
 def chunk_of(slug: str) -> int:
     return zlib.crc32(slug.encode()) % CHUNKS
+
+
+def repo_chunk_of(full_name: str) -> int:
+    return zlib.crc32(full_name.encode()) % REPO_CHUNKS
 
 
 def _ordered(mapping: dict) -> list[dict]:
     """Firestore non conserva l'ordine delle chiavi di una mappa: le etichette si salvano come lista ordinata."""
     return [{"k": k, "v": v} for k, v in mapping.items()]
+
+
+def _hist_to_cloud(hist):
+    """Firestore non ammette liste dentro liste: lo storico [[data, stelle], …] diventa [{d, s}, …]."""
+    return [{"d": h[0], "s": h[1]} for h in hist or []]
+
+
+def _hist_from_cloud(hist):
+    return [[h["d"], h["s"]] if isinstance(h, dict) else h for h in hist or []]
 
 
 def _digest(value) -> str:
@@ -65,6 +81,9 @@ class CloudAgent:
         return KEY_PATH if KEY_PATH.exists() else None
 
     def start(self):
+        # AILISTER_NO_CLOUD=1: istanza di sviluppo/prova che non deve collegarsi al sito né prendere lavori
+        if os.environ.get("AILISTER_NO_CLOUD") == "1":
+            return
         path = self.credentials_path()
         if not path:
             return
@@ -78,6 +97,7 @@ class CloudAgent:
         self.state.update(configured=True, running=True)
         scanner.on_finish.append(lambda: self.request_sync("ricerca completata"))
         refresher.on_finish.append(lambda: self.request_sync("classifiche aggiornate"))
+        github.refresher.on_finish.append(lambda: self.request_sync("repository GitHub aggiornati"))
         threading.Thread(target=self._loop, daemon=True, name="cloud-agent").start()
         threading.Thread(target=self._watch_jobs, daemon=True, name="cloud-jobs").start()
 
@@ -129,7 +149,7 @@ class CloudAgent:
                 self._claude_ready = bool(info.get("loggedIn"))
                 self._claude_checked = time.time()
             self.client.collection("agent").document("status").set({
-                "last_seen": db.now(), "busy": bool(scanner.state["running"] or refresher.state["running"]),
+                "last_seen": db.now(), "busy": bool(scanner.state["running"] or refresher.state["running"] or github.refresher.state["running"]),
                 "claude_ready": self._claude_ready, "version": APP_VERSION, "current_job": self.state["current_job"],
             })
             self._ensure_owner()
@@ -162,17 +182,28 @@ class CloudAgent:
             s = snaps.get(doc_id)
             return (s.to_dict() or {}).get(name, default) if s and s.exists else default
 
+        repos = []
+        for i in range(REPO_CHUNKS):
+            snap = snaps.get(f"repos-{i:02d}")
+            if snap and snap.exists:
+                repos += list((snap.to_dict().get("repos") or {}).values())
+
         # le note personali stanno in un documento leggibile solo dal proprietario
         private = self.client.collection("private").document("notes").get()
         snaps["private/notes"] = private
-        notes = (private.to_dict() or {}).get("notes", {}) if private.exists else {}
+        pdata = (private.to_dict() or {}) if private.exists else {}
+        notes, repo_notes = pdata.get("notes", {}), pdata.get("repo_notes", {})
         for m in models:
             m["notes"] = notes.get(m.get("slug"))
+        for r in repos:
+            r["notes"] = repo_notes.get(r.get("full_name"))
+            r["stars_history"] = _hist_from_cloud(r.get("stars_history"))
 
         catalog = {
             "format": db.CATALOG_FORMAT, "version": db.CATALOG_VERSION, "origin": "cloud",
             "models": models, "videos": field("videos", "videos", []),
             "channels": field("channels", "channels", []), "deleted": field("deleted", "deleted", {}),
+            "repos": repos, "deleted_repos": field("deleted", "deleted_repos", {}),
         }
         return catalog, snaps
 
@@ -201,7 +232,8 @@ class CloudAgent:
         from google.api_core import exceptions as gexc
 
         cloud, snaps = self._pull()
-        stats = db.import_catalog(cloud) if cloud["models"] or cloud["deleted"] or cloud["videos"] else {}
+        has_cloud_data = any(cloud[k] for k in ("models", "deleted", "videos", "repos", "deleted_repos"))
+        stats = db.import_catalog(cloud) if has_cloud_data else {}
         local = db.export_catalog(origin="local", include_rankings=True)
 
         chunks: dict[str, dict] = {f"chunk-{i:02d}": {} for i in range(CHUNKS)}
@@ -211,11 +243,20 @@ class CloudAgent:
             if note:
                 notes[m["slug"]] = note
             chunks[f"chunk-{chunk_of(m['slug']):02d}"][m["slug"]] = m
+        repo_chunks: dict[str, dict] = {f"repos-{i:02d}": {} for i in range(REPO_CHUNKS)}
+        repo_notes = {}
+        for r in local["repos"]:
+            note = r.pop("notes", None)
+            if note:
+                repo_notes[r["full_name"]] = note
+            r["stars_history"] = _hist_to_cloud(r.get("stars_history"))
+            repo_chunks[f"repos-{repo_chunk_of(r['full_name']):02d}"][r["full_name"]] = r
         docs = {name: {"models": models} for name, models in chunks.items()}
+        docs.update({name: {"repos": items} for name, items in repo_chunks.items()})
         docs["videos"] = {"videos": local["videos"]}
         docs["channels"] = {"channels": local["channels"]}
-        docs["deleted"] = {"deleted": local["deleted"]}
-        docs["private/notes"] = {"notes": notes}
+        docs["deleted"] = {"deleted": local["deleted"], "deleted_repos": local["deleted_repos"]}
+        docs["private/notes"] = {"notes": notes, "repo_notes": repo_notes}
 
         batch = self.client.batch()
         writes = 0
@@ -244,6 +285,8 @@ class CloudAgent:
         content = {
             "categories": _ordered(taxonomy.CATEGORIES), "license_types": _ordered(taxonomy.LICENSE_TYPES),
             "availability": _ordered(taxonomy.AVAILABILITY), "link_types": _ordered(taxonomy.LINK_TYPES),
+            "repo_kinds": _ordered(taxonomy.REPO_KINDS),
+            "github_trending_at": db.get_state("github_trending_at"),
             "stats": db.stats(), "synced_at": db.now(), "version": APP_VERSION,
         }
         self.client.collection("meta").document("app").set(content)
@@ -291,7 +334,7 @@ class CloudAgent:
             return
         try:
             while True:
-                if scanner.state["running"] or refresher.state["running"]:
+                if scanner.state["running"] or refresher.state["running"] or github.refresher.state["running"]:
                     return  # occupato: il lavoro resta in coda e verrà preso al prossimo controllo
                 query = self.client.collection("jobs").where("status", "==", "queued")
                 jobs = sorted(query.stream(), key=lambda s: s.to_dict().get("created_at") or "")
@@ -337,6 +380,11 @@ class CloudAgent:
                     ref.update({"status": "queued", "started_at": None})
                     return
                 self._mirror_scan(ref)
+            elif kind == "github":
+                if not github.refresher.start(busy=lambda: scanner.state["running"]):
+                    ref.update({"status": "queued", "started_at": None})
+                    return
+                self._mirror_refresher(ref, github.refresher)
             elif kind == "leaderboards":
                 if not refresher.start():
                     ref.update({"status": "queued", "started_at": None})
@@ -390,6 +438,23 @@ class CloudAgent:
         st = scanner.status()
         self._finish(ref, "error" if st["errors"] and not st["added"] and not st["updated"] else "done",
                      log=st["log"])
+
+    def _mirror_refresher(self, ref, refresher_obj):
+        """Come _mirror_scan, per gli aggiornamenti con un log semplice (es. GitHub)."""
+        last = None
+        while True:
+            st = refresher_obj.state
+            payload = {"log": st["log"][-400:], "log_base": max(0, len(st["log"]) - 400),
+                       "progress": {"phase": "github", "current": "GitHub"}}
+            digest = _digest(payload)
+            if digest != last:
+                ref.update(payload)
+                last = digest
+            if not st["running"]:
+                break
+            time.sleep(4)
+        errors = [l for l in refresher_obj.state["log"] if l["level"] == "error"]
+        self._finish(ref, "error" if errors else "done", log=refresher_obj.state["log"])
 
     def _finish(self, ref, status: str, error: str | None = None, log: list | None = None):
         update = {"status": status, "finished_at": db.now()}

@@ -67,6 +67,31 @@ AVAILABILITY = {
     "paper_only": "Solo paper",
 }
 
+# tipo di repository GitHub
+REPO_KINDS = {
+    "app": "App",
+    "tool": "Strumento",
+    "framework": "Framework / libreria",
+    "model_code": "Codice di un modello",
+    "agent": "Agente",
+    "mcp": "Server MCP",
+    "dataset": "Dataset / benchmark",
+    "awesome": "Raccolta / guida",
+    "other": "Altro",
+}
+
+REPO_KIND_HINTS = {
+    "app": "end-user application (desktop, web, mobile UI)",
+    "tool": "CLI/utility/plugin for a specific task (e.g. ComfyUI node, converter, inference server)",
+    "framework": "library or framework for developers (training, inference, RAG, agents SDK)",
+    "model_code": "official code/weights repo of a specific AI model or paper",
+    "agent": "autonomous agent or agentic system ready to run",
+    "mcp": "Model Context Protocol server or MCP tooling",
+    "dataset": "dataset, benchmark or evaluation harness",
+    "awesome": "curated list, tutorial, course, prompt collection",
+    "other": "anything else",
+}
+
 LINK_TYPES = {
     "website": "Sito",
     "paper": "Paper",

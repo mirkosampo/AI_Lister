@@ -42,6 +42,7 @@
     <aside class="sidebar" id="sidebar">
       <nav class="views" id="views">
         <button data-view="models" class="active">Modelli <span class="count" id="cntModels">0</span></button>
+        <button data-view="repos">Repository <span class="count" id="cntRepos">0</span></button>
         <button data-view="leaderboards">Classifiche <span class="count" id="cntBoards">0</span></button>
         <button data-view="videos">Video <span class="count" id="cntVideos">0</span></button>
         <button data-view="channels">Canali <span class="count" id="cntChannels">0</span></button>
@@ -50,9 +51,9 @@
         <button class="fav-toggle" id="favToggle">★ Solo preferiti</button>
         <h4>Categorie</h4>
         <ul class="cat-list" id="catList"></ul>
-        <h4>Licenza</h4>
+        <h4 id="licTitle">Licenza</h4>
         <div class="chips" id="licChips"></div>
-        <h4>Disponibilità</h4>
+        <h4 id="availTitle">Disponibilità</h4>
         <div class="chips" id="availChips"></div>
         <button class="link-btn" id="resetFilters">Azzera filtri</button>
       </div>
@@ -62,15 +63,8 @@
       <div class="toolbar" id="toolbar">
         <div class="result-info" id="resultInfo"></div>
         <div class="toolbar-right">
-          <select id="sort" title="Ordina">
-            <option value="recent">Aggiunti di recente</option>
-            <option value="release">Data di rilascio</option>
-            <option value="name">Nome A→Z</option>
-            <option value="params">Parametri (più grandi)</option>
-            <option value="params_asc">Parametri (più piccoli)</option>
-            <option value="sources">Più citati</option>
-            <option value="rank">Miglior posizione in classifica</option>
-          </select>
+          <select id="sort" title="Ordina"></select>
+          <button class="btn ghost small owner-only" id="btnGithub" title="Cerca i repository di IA in tendenza e aggiorna stelle e dati da GitHub">⟳ GitHub</button>
           <div class="seg" id="layoutSeg">
             <button data-layout="grid" class="active" title="Schede">▦</button>
             <button data-layout="table" title="Tabella">☰</button>
@@ -137,6 +131,23 @@
         <input name="artificial_analysis_api_key" type="password" autocomplete="off" placeholder="Incolla la chiave">
         <span class="hint" id="aaKeyHint"></span>
       </label>
+      <fieldset class="cloud-settings">
+        <legend>Repository GitHub</legend>
+        <label class="check"><input type="checkbox" name="github_trending">
+          Includi nelle ricerche i repo di IA in tendenza su GitHub (al massimo ogni 12 ore)
+        </label>
+        <label>Argomenti GitHub da seguire <small>(separati da virgola)</small>
+          <input name="github_topics" placeholder="llm, ai-agents, mcp">
+        </label>
+        <div class="edit-row">
+          <label>Creati negli ultimi (giorni)<input name="github_days" type="number" min="1" max="90"></label>
+          <label>Stelle minime<input name="github_min_stars" type="number" min="0"></label>
+        </div>
+        <label>Token GitHub <small>(facoltativo: alza il limite da 60 a 5000 richieste/ora)</small>
+          <input name="github_token" type="password" autocomplete="off" placeholder="Incolla il token">
+          <span class="hint" id="ghTokenHint"></span>
+        </label>
+      </fieldset>
       <fieldset class="cloud-settings">
         <legend>Sito Firebase</legend>
         <div id="cloudBox" class="health"></div>

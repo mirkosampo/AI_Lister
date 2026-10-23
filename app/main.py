@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyzer, db, leaderboards, taxonomy, youtube
+from . import analyzer, db, github, leaderboards, taxonomy, youtube
 from .config import STATIC_DIR, ensure_dirs, get_secret, load_settings, save_settings, set_secret
 from .cloud import agent
 from .leaderboards import refresher
@@ -61,6 +61,7 @@ def meta():
         "license_types": taxonomy.LICENSE_TYPES,
         "availability": taxonomy.AVAILABILITY,
         "link_types": taxonomy.LINK_TYPES,
+        "repo_kinds": taxonomy.REPO_KINDS,
         "stats": db.stats(),
     }
 
@@ -89,6 +90,41 @@ def delete_model(model_id: int):
     db.delete_model(model_id)
     agent.request_sync("eliminazione")
     return {"ok": True}
+
+
+# ---------- repository GitHub ----------
+
+@app.get("/api/repos")
+def repos():
+    return db.list_repos()
+
+
+@app.patch("/api/repos/{repo_id}")
+def patch_repo(repo_id: int, fields: dict):
+    repo = db.update_repo(repo_id, fields)
+    if not repo:
+        raise HTTPException(404)
+    agent.request_sync("modifica repo")
+    return repo
+
+
+@app.delete("/api/repos/{repo_id}")
+def delete_repo(repo_id: int):
+    db.delete_repo(repo_id)
+    agent.request_sync("eliminazione repo")
+    return {"ok": True}
+
+
+@app.post("/api/github/refresh")
+def github_refresh():
+    if not github.refresher.start(busy=lambda: scanner.state["running"]):
+        raise HTTPException(409, "Una ricerca o un aggiornamento GitHub è già in corso")
+    return {"ok": True}
+
+
+@app.get("/api/github/status")
+def github_status():
+    return github.refresher.status()
 
 
 @app.get("/api/export")
@@ -169,6 +205,8 @@ def videos():
 
 @app.post("/api/scan")
 def start_scan(req: ScanRequest):
+    if github.refresher.state["running"]:
+        raise HTTPException(409, "È in corso un aggiornamento da GitHub: riprova tra poco")
     if not scanner.start(channel_ids=req.channel_ids, limit=req.limit, force=req.force):
         raise HTTPException(409, "Una ricerca è già in corso")
     return {"ok": True}
@@ -179,6 +217,8 @@ def scan_videos(req: VideoRequest):
     ids = [vid for vid in (youtube.parse_video_id(u) for u in req.urls) if vid]
     if not ids:
         raise HTTPException(400, "Nessun link YouTube valido")
+    if github.refresher.state["running"]:
+        raise HTTPException(409, "È in corso un aggiornamento da GitHub: riprova tra poco")
     if not scanner.start(video_ids=ids):
         raise HTTPException(409, "Una ricerca è già in corso")
     return {"ok": True, "video_ids": ids}
@@ -230,7 +270,8 @@ def leaderboard_entries(board_id: str):
 
 def _settings_view() -> dict:
     # le chiavi segrete non lasciano mai il server: al browser arriva solo se sono impostate
-    return {**load_settings(), "aa_key_set": bool(get_secret("ARTIFICIAL_ANALYSIS_API_KEY"))}
+    return {**load_settings(), "aa_key_set": bool(get_secret("ARTIFICIAL_ANALYSIS_API_KEY")),
+            "github_token_set": bool(get_secret("GITHUB_TOKEN"))}
 
 
 @app.get("/api/settings")
@@ -243,6 +284,9 @@ def put_settings(values: dict):
     key = values.pop("artificial_analysis_api_key", None)
     if key is not None:
         set_secret("ARTIFICIAL_ANALYSIS_API_KEY", key)
+    token = values.pop("github_token", None)
+    if token is not None:
+        set_secret("GITHUB_TOKEN", token)
     save_settings(values)
     if "cloud_owner_email" in values and agent.state["configured"]:
         # aggiorna subito chi può modificare il sito

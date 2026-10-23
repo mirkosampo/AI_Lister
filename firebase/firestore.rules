@@ -15,7 +15,7 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/owners/$(request.auth.token.email.lower()));
     }
 
-    // catalogo: chunk-00…15 (modelli), videos, channels, deleted
+    // catalogo: chunk-00…15 (modelli), repos-00…07 (repository GitHub), videos, channels, deleted
     match /catalog/{doc} {
       allow read: if true;
       allow write: if isOwner();
@@ -49,7 +49,7 @@ service cloud.firestore {
         && request.resource.data.status == 'queued'
         && request.resource.data.keys().hasOnly(['type', 'params', 'status', 'created_at'])
         && request.resource.data.type in
-             ['scan', 'videos', 'leaderboards', 'add_channel', 'update_channel', 'delete_channel'];
+             ['scan', 'videos', 'leaderboards', 'github', 'add_channel', 'update_channel', 'delete_channel'];
       // dal sito si può solo chiedere l'annullamento
       allow update: if isOwner()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cancel_requested']);

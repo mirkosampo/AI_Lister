@@ -31,6 +31,32 @@ function crc32(str) {
   return (c ^ 0xffffffff) >>> 0;
 }
 const chunkId = (slug) => `chunk-${String(crc32(slug) % CHUNKS).padStart(2, "0")}`;
+const REPO_CHUNKS = 8;
+const repoChunkId = (full) => `repos-${String(crc32(full) % REPO_CHUNKS).padStart(2, "0")}`;
+const GH_RE = /github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/i;
+const GH_RESERVED = new Set(["orgs", "topics", "trending", "features", "sponsors", "marketplace", "collections", "about",
+  "settings", "apps", "login", "explore", "pricing", "enterprise", "search", "notifications", "site", "security"]);
+function parseRepo(url) {
+  const m = GH_RE.exec(url || "");
+  if (!m || GH_RESERVED.has(m[1].toLowerCase())) return null;
+  return `${m[1]}/${m[2].replace(/\.git$/, "")}`.toLowerCase();
+}
+// stessa logica di db.stars_per_day
+function starsPerDay(r) {
+  const hist = r.stars_history || [];
+  if (hist.length >= 2) {
+    const [lastDate, last] = hist[hist.length - 1];
+    const win = hist.filter((h) => (ts(lastDate) - ts(h[0])) / 86400000 <= 7);
+    const [firstDate, first] = win[0];
+    const days = (ts(lastDate) - ts(firstDate)) / 86400000;
+    if (days >= 0.9) return Math.round(((last - first) / days) * 10) / 10;
+  }
+  if (r.stars != null && r.created_at_gh) {
+    const age = (Date.now() - ts(r.created_at_gh)) / 86400000;
+    if (age <= 60) return Math.round((r.stars / Math.max(age, 1)) * 10) / 10;
+  }
+  return null;
+}
 const slugify = (s) => (s || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 const SCALAR_FIELDS = ["developer", "category", "license_type", "license_name", "parameters", "parameters_b",
@@ -45,8 +71,9 @@ export async function create(config) {
   const db = fs.getFirestore(app);
   const auth = au.getAuth(app);
 
-  const data = { chunks: {}, videos: [], channels: [], deleted: {}, notes: {}, meta: null, lbIndex: null, agent: null, jobs: [] };
-  const ids = { bySlug: new Map(), next: 1_000_000 };
+  const data = { chunks: {}, videos: [], channels: [], deleted: {}, notes: {}, meta: null, lbIndex: null, agent: null, jobs: [],
+    repoChunks: {}, deletedRepos: {}, repoNotes: {} };
+  const ids = { bySlug: new Map(), next: 1_000_000, byRepo: new Map(), nextRepo: 2_000_000 };
   let user = null;
   let isOwner = false;
   let onChange = () => {};
@@ -65,11 +92,17 @@ export async function create(config) {
   listen(fs.collection(db, "catalog"), (snap) => {
     snap.docChanges().forEach((ch) => {
       const d = ch.doc.data();
-      if (ch.type === "removed") { delete data.chunks[ch.doc.id]; return; }
+      if (ch.type === "removed") { delete data.chunks[ch.doc.id]; delete data.repoChunks[ch.doc.id]; return; }
       if (ch.doc.id.startsWith("chunk-")) data.chunks[ch.doc.id] = d.models || {};
+      else if (ch.doc.id.startsWith("repos-")) {
+        // su Firestore lo storico delle stelle è [{d, s}] (niente liste annidate): qui torna [[data, stelle]]
+        const repos = d.repos || {};
+        for (const r of Object.values(repos)) r.stars_history = (r.stars_history || []).map((h) => (Array.isArray(h) ? h : [h.d, h.s]));
+        data.repoChunks[ch.doc.id] = repos;
+      }
       else if (ch.doc.id === "videos") data.videos = d.videos || [];
       else if (ch.doc.id === "channels") data.channels = d.channels || [];
-      else if (ch.doc.id === "deleted") data.deleted = d.deleted || {};
+      else if (ch.doc.id === "deleted") { data.deleted = d.deleted || {}; data.deletedRepos = d.deleted_repos || {}; }
     });
   });
   listen(fs.doc(db, "meta", "app"), (s) => { data.meta = s.exists() ? s.data() : null; });
@@ -89,9 +122,14 @@ export async function create(config) {
           isOwner = (await fs.getDoc(fs.doc(db, "owners", u.email.toLowerCase()))).exists();
         } catch { isOwner = false; }
       }
-      if (notesUnsub) { notesUnsub(); notesUnsub = null; data.notes = {}; }
+      if (notesUnsub) { notesUnsub(); notesUnsub = null; data.notes = {}; data.repoNotes = {}; }
       if (isOwner) {
-        notesUnsub = fs.onSnapshot(fs.doc(db, "private", "notes"), (s) => { data.notes = (s.exists() && s.data().notes) || {}; notify(); });
+        notesUnsub = fs.onSnapshot(fs.doc(db, "private", "notes"), (s) => {
+          const d = s.exists() ? s.data() : {};
+          data.notes = d.notes || {};
+          data.repoNotes = d.repo_notes || {};
+          notify();
+        });
       }
       document.body.classList.toggle("owner", isOwner);
       document.body.classList.toggle("viewer", !isOwner);
@@ -114,14 +152,57 @@ export async function create(config) {
   const videoMap = () => Object.fromEntries(data.videos.map((v) => [v.id, v]));
   const channelId = (c, i) => c.id ?? 900_000 + i;
 
+  const allRepos = () => Object.values(data.repoChunks).flatMap((c) => Object.values(c));
+  const repoIdOf = (r) => {
+    if (r.id) { ids.byRepo.set(r.full_name, r.id); return r.id; }
+    if (!ids.byRepo.has(r.full_name)) ids.byRepo.set(r.full_name, ids.nextRepo++);
+    return ids.byRepo.get(r.full_name);
+  };
+  const findRepoById = (id) => allRepos().find((r) => repoIdOf(r) === Number(id));
+
+  function expandSources(list) {
+    const vids = videoMap();
+    const chans = channelByHandle();
+    return (list || []).map((s) => {
+      const v = vids[s.video_id] || {};
+      return { video_id: s.video_id, timestamp_sec: s.timestamp_sec, title: v.title, url: v.url || `https://www.youtube.com/watch?v=${s.video_id}`,
+        published_at: v.published_at, thumbnail: v.thumbnail, channel_name: chans[v.channel_handle]?.name };
+    }).sort((a, b) => (b.published_at || "").localeCompare(a.published_at || ""));
+  }
+
+  // full_name -> modelli che hanno quel repository tra i link
+  function modelsByRepo() {
+    const out = {};
+    for (const m of allModels()) {
+      for (const l of m.links || []) {
+        const full = parseRepo(l.url);
+        if (full) (out[full] ||= []).push({ id: idOf(m), name: m.name });
+      }
+    }
+    return out;
+  }
+
+  function buildRepos() {
+    const links = modelsByRepo();
+    return allRepos().map((r) => ({
+      ...r, id: repoIdOf(r), notes: data.repoNotes[r.full_name] ?? null,
+      sources: expandSources(r.sources), models: links[r.full_name] || [], stars_per_day: starsPerDay(r),
+    })).sort((a, b) => (b.first_seen || "").localeCompare(a.first_seen || ""));
+  }
+
   function buildModels() {
     const vids = videoMap();
     const chans = channelByHandle();
+    const reposOf = {};
+    for (const r of allRepos()) {
+      for (const m of modelsByRepo()[r.full_name] || []) (reposOf[m.id] ||= []).push({ id: repoIdOf(r), name: r.name, stars: r.stars });
+    }
     return allModels().map((m) => ({
       ...m,
       id: idOf(m),
       notes: data.notes[m.slug] ?? null,
       rankings: m.rankings || [],
+      repos: reposOf[idOf(m)] || [],
       sources: (m.sources || []).map((s) => {
         const v = vids[s.video_id] || {};
         return { video_id: s.video_id, timestamp_sec: s.timestamp_sec, title: v.title, url: v.url || `https://www.youtube.com/watch?v=${s.video_id}`,
@@ -152,6 +233,11 @@ export async function create(config) {
         return { ...rest, notes: isOwner ? data.notes[m.slug] ?? null : null };
       }),
       videos: clone(data.videos), channels: clone(data.channels), deleted: clone(data.deleted),
+      repos: allRepos().map((r) => {
+        const { id, ...rest } = r;
+        return { ...rest, notes: isOwner ? data.repoNotes[r.full_name] ?? null : null };
+      }),
+      deleted_repos: clone(data.deletedRepos),
     };
   }
 
@@ -228,6 +314,39 @@ export async function create(config) {
     return buildModels().find((x) => x.slug === m.slug);
   }
 
+  async function patchRepo(id, fields) {
+    requireOwner();
+    const r = findRepoById(id);
+    if (!r) throw new Error("Repository non trovato");
+    const when = nowIso();
+    const args = [];
+    for (const [k, v] of Object.entries(fields)) {
+      if (!["starred", "category", "kind", "summary", "details", "tags"].includes(k)) continue;
+      args.push(new fs.FieldPath("repos", r.full_name, k), v);
+      r[k] = v;
+    }
+    args.push(new fs.FieldPath("repos", r.full_name, "updated_at"), when);
+    r.updated_at = when;
+    await fs.updateDoc(fs.doc(db, "catalog", repoChunkId(r.full_name)), ...args);
+    if ("notes" in fields) {
+      const nref = fs.doc(db, "private", "notes");
+      await fs.setDoc(nref, { repo_notes: { [r.full_name]: fields.notes || fs.deleteField() } }, { merge: true });
+      data.repoNotes[r.full_name] = fields.notes || null;
+    }
+    return buildRepos().find((x) => x.full_name === r.full_name);
+  }
+
+  async function deleteRepo(id) {
+    requireOwner();
+    const r = findRepoById(id);
+    if (!r) return { ok: true };
+    const batch = fs.writeBatch(db);
+    batch.update(fs.doc(db, "catalog", repoChunkId(r.full_name)), new fs.FieldPath("repos", r.full_name), fs.deleteField());
+    batch.set(fs.doc(db, "catalog", "deleted"), { deleted_repos: { [r.full_name]: nowIso() } }, { merge: true });
+    await batch.commit();
+    return { ok: true };
+  }
+
   async function deleteModel(id) {
     requireOwner();
     const m = findById(id);
@@ -245,7 +364,8 @@ export async function create(config) {
     requireOwner();
     if (inc?.format !== "ai-lister-catalog") throw new Error("File non riconosciuto: non è un catalogo esportato da AI Lister.");
     if ((inc.version || 0) > 1) throw new Error("Il file proviene da una versione più recente di AI Lister.");
-    const stats = { added: 0, updated: 0, unchanged: 0, deleted: 0, skipped_deleted: 0, videos: 0, channels: 0 };
+    const stats = { added: 0, updated: 0, unchanged: 0, deleted: 0, skipped_deleted: 0, videos: 0, channels: 0,
+      repos_added: 0, repos_updated: 0, repos_deleted: 0 };
     const models = Object.fromEntries(allModels().map((m) => [m.slug, clone(m)]));
     const channels = clone(data.channels);
     const videos = clone(data.videos);
@@ -310,6 +430,53 @@ export async function create(config) {
       if (JSON.stringify(cur) + (notes[slug] || "") !== before) stats.updated++; else stats.unchanged++;
     }
 
+    // repository: stessa logica di db._import_repos
+    const repos = Object.fromEntries(allRepos().map((r) => [r.full_name, clone(r)]));
+    const deletedRepos = clone(data.deletedRepos);
+    const repoNotes = clone(data.repoNotes);
+    for (const [full, when] of Object.entries(inc.deleted_repos || {})) {
+      if (repos[full] && ts(when) >= ts(repos[full].updated_at)) { delete repos[full]; stats.repos_deleted++; }
+      if (ts(when) > ts(deletedRepos[full])) deletedRepos[full] = when;
+    }
+    for (const raw of inc.repos || []) {
+      const { id, models: _m, stars_per_day: _s, ...r } = raw;
+      const full = parseRepo(r.url) || (r.full_name || "").toLowerCase();
+      if (!full) continue;
+      if (deletedRepos[full] && ts(deletedRepos[full]) >= ts(r.updated_at)) continue;
+      const incNote = r.notes;
+      delete r.notes;
+      const cur = repos[full];
+      if (!cur) {
+        repos[full] = { ...r, full_name: full, sources: (r.sources || []).filter((s) => videoIds.has(s.video_id)) };
+        if (incNote) repoNotes[full] = incNote;
+        stats.repos_added++;
+        continue;
+      }
+      const before = JSON.stringify(cur) + (repoNotes[full] || "");
+      const newer = ts(r.updated_at) > ts(cur.updated_at);
+      for (const f of ["summary", "details", "category", "kind"]) {
+        if (!empty(r[f]) && r[f] !== cur[f] && (newer || empty(cur[f]))) cur[f] = r[f];
+      }
+      if (newer) {
+        cur.starred = r.starred ? 1 : 0;
+        if ((incNote || "") !== (repoNotes[full] || "")) repoNotes[full] = incNote || null;
+        cur.updated_at = r.updated_at;
+      }
+      if (ts(r.gh_fetched_at) > ts(cur.gh_fetched_at)) {
+        for (const f of ["name", "url", "description", "language", "license", "stars", "forks", "open_issues", "homepage",
+          "created_at_gh", "pushed_at", "archived", "topics", "gh_fetched_at"]) if (r[f] != null) cur[f] = r[f];
+      }
+      for (const f of ["from_video", "from_trending"]) if (r[f]) cur[f] = 1;
+      const low = new Set((cur.tags || []).map((x) => String(x).toLowerCase()));
+      cur.tags = [...(cur.tags || []), ...(r.tags || []).filter((x) => x && !low.has(String(x).toLowerCase()))];
+      const hist = Object.fromEntries((cur.stars_history || []).map((h) => [h[0].slice(0, 10), h]));
+      for (const h of r.stars_history || []) hist[h[0].slice(0, 10)] ||= h;
+      cur.stars_history = Object.keys(hist).sort().map((k) => hist[k]).slice(-40);
+      const have = new Set((cur.sources || []).map((s) => s.video_id));
+      cur.sources = [...(cur.sources || []), ...(r.sources || []).filter((s) => videoIds.has(s.video_id) && !have.has(s.video_id))];
+      if (JSON.stringify(cur) + (repoNotes[full] || "") !== before) stats.repos_updated++;
+    }
+
     // scrive solo i documenti cambiati
     const chunks = Object.fromEntries(Array.from({ length: CHUNKS }, (_, i) => [`chunk-${String(i).padStart(2, "0")}`, {}]));
     for (const m of Object.values(models)) chunks[chunkId(m.slug)][m.slug] = m;
@@ -323,9 +490,18 @@ export async function create(config) {
     for (const [cid, content] of Object.entries(chunks)) put(fs.doc(db, "catalog", cid), { models: content }, { models: data.chunks[cid] || {} });
     put(fs.doc(db, "catalog", "videos"), { videos }, { videos: data.videos });
     put(fs.doc(db, "catalog", "channels"), { channels }, { channels: data.channels });
-    put(fs.doc(db, "catalog", "deleted"), { deleted }, { deleted: data.deleted });
-    const cleanNotes = Object.fromEntries(Object.entries(notes).filter(([, v]) => v));
-    put(fs.doc(db, "private", "notes"), { notes: cleanNotes }, { notes: data.notes });
+    const rchunks = Object.fromEntries(Array.from({ length: REPO_CHUNKS }, (_, i) => [`repos-${String(i).padStart(2, "0")}`, {}]));
+    const histToCloud = (r) => ({ ...r, stars_history: (r.stars_history || []).map((h) => ({ d: h[0], s: h[1] })) });
+    for (const r of Object.values(repos)) rchunks[repoChunkId(r.full_name)][r.full_name] = histToCloud(r);
+    for (const [cid, content] of Object.entries(rchunks)) {
+      const current = Object.fromEntries(Object.entries(data.repoChunks[cid] || {}).map(([k, r]) => [k, histToCloud(r)]));
+      put(fs.doc(db, "catalog", cid), { repos: content }, { repos: current });
+    }
+    put(fs.doc(db, "catalog", "deleted"), { deleted, deleted_repos: deletedRepos },
+      { deleted: data.deleted, deleted_repos: data.deletedRepos });
+    const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v));
+    put(fs.doc(db, "private", "notes"), { notes: clean(notes), repo_notes: clean(repoNotes) },
+      { notes: data.notes, repo_notes: data.repoNotes });
     if (writes) await batch.commit();
     return stats;
   }
@@ -342,7 +518,8 @@ export async function create(config) {
     if (p === "/api/meta") {
       const meta = data.meta || {};
       return { categories: fromOrdered(meta.categories), license_types: fromOrdered(meta.license_types),
-        availability: fromOrdered(meta.availability), link_types: fromOrdered(meta.link_types), stats: { models: allModels().length, videos: data.videos.length,
+        availability: fromOrdered(meta.availability), link_types: fromOrdered(meta.link_types),
+        repo_kinds: fromOrdered(meta.repo_kinds), stats: { repos: allRepos().length, models: allModels().length, videos: data.videos.length,
           videos_done: data.videos.filter((v) => v.status === "done").length, channels: data.channels.length } };
     }
     if (p === "/api/models" && method === "GET") return buildModels();
@@ -351,6 +528,18 @@ export async function create(config) {
       if (method === "DELETE") return deleteModel(m[1]);
     }
     if (p === "/api/videos") return buildVideos();
+    if (p === "/api/repos" && method === "GET") return buildRepos();
+    if ((m = p.match(/^\/api\/repos\/(\d+)$/))) {
+      if (method === "PATCH") return patchRepo(m[1], body || {});
+      if (method === "DELETE") return deleteRepo(m[1]);
+    }
+    if (p === "/api/github/refresh") return enqueue("github");
+    if (p === "/api/github/status") {
+      const job = latestJob(["github"]);
+      const running = job && (job.status === "queued" || job.status === "running");
+      return { running: !!running, finished_at: job?.finished_at || null, log: job?.log || [],
+        trending_at: data.meta?.github_trending_at || null };
+    }
     if (p === "/api/channels" && method === "GET") return buildChannels();
     if (p === "/api/channels" && method === "POST") return enqueue("add_channel", { value: body.value });
     if ((m = p.match(/^\/api\/channels\/(\d+)$/))) {

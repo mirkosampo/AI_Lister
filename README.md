@@ -19,6 +19,9 @@ Claude estrae ogni modello presentato, lo classifica e, se vuoi, verifica i dati
 - **Filtri**: 17 categorie (LLM, immagini, video, voce, 3D, robotica…), tipo di licenza, disponibilità (locale, API, web app, demo…), preferiti.
 - **Scheda dettagliata** per ogni modello: parametri (anche attivi per i MoE), contesto, architettura, dimensione su disco, VRAM,
   modalità di input/output, caratteristiche principali, link (Hugging Face, GitHub, paper, demo, sito…) e video in cui appare con link al minuto esatto.
+- **Repository GitHub**: i repo citati nei video (tool, app, framework, agenti, server MCP, codice dei modelli) e
+  i repo di IA in tendenza su GitHub, con stelle, crescita giornaliera, linguaggio, licenza e ultimo aggiornamento.
+  Vedi [Repository GitHub](#repository-github).
 - **Classifiche**: 22 leaderboard importate automaticamente da [Arena](https://arena.ai/leaderboard) ed [Epoch AI](https://epoch.ai/benchmarks)
   (più 7 da [Artificial Analysis](https://artificialanalysis.ai) con una chiave gratuita), collegate ai modelli del catalogo,
   e una directory di altre ~30 leaderboard da consultare. Vedi [Classifiche](#classifiche).
@@ -133,6 +136,34 @@ Categorie: Linguaggio (LLM), Codice, Agenti & Computer use, Multimodale / Vision
 Generazione video, Musica & Audio, Voce (TTS / STT), 3D & Scene, World model, Avatar & Animazione, Robotica,
 Upscaling & Restauro, Embedding & Retrieval, Scienza & Ricerca, Altro. Si modificano in [`app/taxonomy.py`](app/taxonomy.py).
 
+## Repository GitHub
+
+La scheda **Repository** elenca i progetti GitHub legati all'IA. Hanno le stesse funzioni dei modelli: ricerca,
+filtri per categoria, tipo (app, strumento, framework, codice di un modello, agente, server MCP, dataset, raccolta) e fonte,
+preferiti, note, correzioni, esporta/importa e sincronizzazione con il sito.
+
+Arrivano da due fonti, entrambe comprese nel pulsante **Cerca nuovi modelli**:
+
+1. **Video**: durante l'analisi Claude estrae anche ogni repository linkato nella descrizione o presentato nel video.
+2. **Tendenze GitHub**: al massimo ogni 12 ore l'app cerca, per ogni argomento impostato (`llm`, `ai-agents`,
+   `generative-ai`, `diffusion-models`, `text-to-speech`, `text-to-video`, `mcp`, `rag`), i repository creati negli ultimi
+   14 giorni con almeno 100 stelle. Usa l'[API di ricerca ufficiale](https://docs.github.com/en/rest/search/search),
+   perché GitHub non offre un'API per la pagina Trending. I candidati nuovi vengono valutati da Claude in un'unica
+   chiamata, senza ricerca web: scarta quelli non pertinenti (non verranno rivalutati) e scrive riassunto e categoria.
+   Il pulsante **⟳ GitHub** nella scheda Repository la avvia subito.
+
+I dati di GitHub (stelle, fork, issue, linguaggio, licenza, argomenti, ultimo commit) vengono letti per i repo nuovi
+e aggiornati ogni 24 ore. Lo storico delle stelle permette l'ordinamento **In crescita**, in stelle al giorno, e un
+piccolo grafico nel dettaglio. Un repository viene collegato ai modelli che lo hanno tra i propri link: lo vedi nel
+dettaglio di entrambi.
+
+Un repository eliminato non ricompare dalle tendenze; torna solo se viene citato in un nuovo video.
+
+**Limiti di GitHub**: senza token 10 ricerche al minuto e 60 richieste all'ora, e l'app si regola da sola. Con un
+[token a grana fine](https://github.com/settings/personal-access-tokens/new) senza alcun permesso (⚙ Impostazioni →
+*Token GitHub*, salvato in `.env`) il limite sale a 5000 richieste all'ora. Argomenti, giorni e stelle minime si
+cambiano nelle impostazioni.
+
 ## Classifiche
 
 ![Classifiche](docs/classifiche.jpg)
@@ -223,6 +254,8 @@ Serve per backup, per spostare il catalogo su un altro PC, o per aggiornare la v
 | Percorso Claude CLI | automatico | |
 | Chiave API Artificial Analysis | — | facoltativa, salvata in `.env` |
 | Account Google proprietario | — | solo per il sito Firebase: chi può modificare e avviare ricerche |
+| Repo di tendenza su GitHub | attivo | argomenti, giorni (14) e stelle minime (100) modificabili |
+| Token GitHub | — | facoltativo, salvato in `.env` |
 
 Le impostazioni sono salvate in `data/settings.json`, le chiavi in `.env`.
 
@@ -265,6 +298,7 @@ app/
   analyzer.py    prompt, JSON Schema e invocazione di `claude -p`
   leaderboards.py  directory delle leaderboard e importazione da Arena, Epoch AI, Artificial Analysis
   cloud.py       collegamento con Firebase: sincronizzazione, coda di lavori, stato del PC
+  github.py      dati dall'API di GitHub e repository di IA in tendenza
   db.py          SQLite e logica di unione dei modelli
   taxonomy.py    categorie, licenze, tipi di link
   config.py      percorsi e impostazioni

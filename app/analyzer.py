@@ -161,6 +161,35 @@ OUTPUT_SCHEMA = {
     "required": ["video_summary", "models"],
 }
 
+REPO_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string", "description": "https://github.com/owner/repo"},
+        "category": {"type": "string", "enum": list(taxonomy.CATEGORIES)},
+        "kind": {"type": "string", "enum": list(taxonomy.REPO_KINDS)},
+        "summary": {"type": "string", "description": "one sentence"},
+        "details": {"type": "string", "description": "2-4 sentences: what it does, why notable, how to use"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "timestamp_sec": {"type": ["integer", "null"]},
+    },
+    "required": ["url", "category", "kind", "summary"],
+}
+OUTPUT_SCHEMA["properties"]["repos"] = {"type": "array", "items": REPO_ITEM_SCHEMA}
+
+TRENDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "repos": {
+            "type": "array",
+            "items": {**REPO_ITEM_SCHEMA, "properties": {
+                **REPO_ITEM_SCHEMA["properties"],
+                "relevant": {"type": "boolean", "description": "true only if genuinely about AI/ML"},
+            }, "required": ["url", "relevant", "category", "kind", "summary"]},
+        },
+    },
+    "required": ["repos"],
+}
+
 
 def _bullets(mapping: dict) -> str:
     return "\n".join(f"- {k}: {v}" for k, v in mapping.items())
@@ -206,6 +235,14 @@ RULES
 - `timestamp_sec`: use chapter starts or the [mm:ss] markers of the transcript.
 - `summary`, `description`, `key_features` MUST be written in {lang}. Names, tags and enums stay in English.
 - Tags: short lowercase English keywords (e.g. "reasoning", "moe", "text-to-video", "voice-cloning", "realtime").
+
+GITHUB REPOSITORIES (`repos`)
+- Also list every GitHub repository (github.com/owner/repo) linked in the description or presented in the video:
+  tools, apps, frameworks, agents, MCP servers, ComfyUI nodes, datasets, and the official code repos of the models above.
+- Skip sponsor repos and GitHub links that are not a repository (user profiles, orgs, topics).
+- `url` must be the exact repository URL (https://github.com/owner/repo), copied from the description or verified.
+- `kind`: {", ".join(f"{k} = {v}" for k, v in taxonomy.REPO_KIND_HINTS.items())}.
+- `summary`, `details` in {lang}; `category` from the same list as models.
 
 CATEGORIES (pick the single best one)
 {_bullets(taxonomy.CATEGORY_HINTS)}
@@ -258,21 +295,27 @@ def run_analysis(
     settings: dict,
     log: Callable[[str], None],
     register_proc: Callable[[subprocess.Popen | None], None],
+    schema: dict | None = None,
+    web: bool | None = None,
+    effort: str | None = None,
 ) -> dict:
+    """Esegue `claude -p` con output validato da `schema` (default: analisi di un video).
+    web/effort sovrascrivono le impostazioni (es. classificazione dei repo di tendenza: niente web, effort basso)."""
     claude = find_claude(settings.get("claude_path", ""))
     if not claude:
         raise AnalysisError("Claude CLI non trovata. Installala o imposta il percorso nelle impostazioni.")
 
-    tools = "WebSearch,WebFetch" if settings["web_enrich"] else ""
+    use_web = settings["web_enrich"] if web is None else web
+    tools = "WebSearch,WebFetch" if use_web else ""
     cmd = [
         claude, "-p",
         "--output-format", "stream-json", "--verbose",
         "--model", settings["model"],
-        "--effort", settings["effort"],
+        "--effort", effort or settings["effort"],
         "--tools", tools,
         "--permission-mode", "dontAsk",
         "--no-session-persistence",
-        "--json-schema", json.dumps(OUTPUT_SCHEMA),
+        "--json-schema", json.dumps(schema or OUTPUT_SCHEMA),
     ]
     if tools:
         cmd += ["--allowedTools", tools]
