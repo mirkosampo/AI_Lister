@@ -37,6 +37,8 @@ const state = {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 async function api(path, opts = {}) {
+  // sul sito Firebase le stesse chiamate sono servite da Firestore (static/cloud.js)
+  if (window.CLOUD) return window.CLOUD.api(path, opts);
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...opts,
@@ -246,7 +248,7 @@ function emptyState() {
   return `<div class="empty"><div class="big">🛰️</div><h3>Il catalogo è vuoto</h3>
     <p>Premi <b>Cerca nuovi modelli</b>: l'app controllerà gli ultimi video dei canali in lista
     e Claude estrarrà e classificherà i modelli presentati.</p>
-    <button class="btn primary" id="emptyScan">Cerca nuovi modelli</button></div>`;
+    <button class="btn primary owner-only" id="emptyScan">Cerca nuovi modelli</button></div>`;
 }
 
 function renderModels() {
@@ -317,7 +319,7 @@ function renderVideos() {
       </div>
       <div class="vact">
         ${v.status === "done" && v.models_found ? `<button class="btn small" data-show-video="${v.id}">Vedi modelli</button>` : ""}
-        <button class="btn small ${v.status === "done" ? "ghost" : ""}" data-analyze="${v.id}">${v.status === "done" ? "Rianalizza" : "Analizza"}</button>
+        <button class="btn small owner-only ${v.status === "done" ? "ghost" : ""}" data-analyze="${v.id}">${v.status === "done" ? "Rianalizza" : "Analizza"}</button>
       </div>
     </div>`).join("")}</div>`;
 }
@@ -326,20 +328,20 @@ function renderVideos() {
 
 function renderChannels() {
   return `
-    <form class="add-channel" id="addChannelForm">
+    <form class="add-channel owner-only" id="addChannelForm">
       <input name="value" placeholder="@nomecanale oppure link del canale YouTube" autocomplete="off">
       <button class="btn primary">Aggiungi canale</button>
     </form>
     <div class="list">${state.channels.map((c) => `
       <div class="crow ${c.enabled ? "" : "disabled"}">
-        <label class="switch" title="Attivo nelle ricerche"><input type="checkbox" data-toggle-ch="${c.id}" ${c.enabled ? "checked" : ""}><span></span></label>
+        <label class="switch owner-only" title="Attivo nelle ricerche"><input type="checkbox" data-toggle-ch="${c.id}" ${c.enabled ? "checked" : ""}><span></span></label>
         <div class="grow">
           <div class="cn"><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name || c.handle)}</a></div>
           <div class="cm">${esc(c.handle)} · ${c.video_count} video scoperti · ${c.analyzed_count || 0} analizzati
             ${c.last_scan_at ? ` · ultima ricerca ${esc(relTime(c.last_scan_at))}` : ""}</div>
         </div>
-        <button class="btn small" data-scan-ch="${c.id}">Cerca solo qui</button>
-        <button class="btn small danger" data-del-ch="${c.id}">Rimuovi</button>
+        <button class="btn small owner-only" data-scan-ch="${c.id}">Cerca solo qui</button>
+        <button class="btn small danger owner-only" data-del-ch="${c.id}">Rimuovi</button>
       </div>`).join("")}
     </div>`;
 }
@@ -366,7 +368,7 @@ function lbHeader() {
     </div>
     <div class="lb-refresh">
       <span class="meta-small">${s.running ? "aggiornamento in corso…" : esc(updated)}</span>
-      <button class="btn small" id="lbRefresh" ${s.running ? "disabled" : ""}>${s.running ? '<span class="spinner tiny"></span>' : "⟳"} Aggiorna</button>
+      <button class="btn small owner-only" id="lbRefresh" ${s.running ? "disabled" : ""}>${s.running ? '<span class="spinner tiny"></span>' : "⟳"} Aggiorna</button>
     </div>
   </div>`;
 }
@@ -406,7 +408,7 @@ function renderBoards() {
       <div class="chips">${byCat[c].map((b) => `<button class="chip ${b.id === state.lbBoard ? "on" : ""}" data-board="${esc(b.id)}" title="${esc(b.description || "")}">${esc(b.name)}${b.matched ? ` <span class="count">${b.matched}</span>` : ""}</button>`).join("")}</div>
     </div>`).join("");
 
-  const aaHint = aa_key_set ? "" : `<div class="lb-hint">Vuoi anche <b>Artificial Analysis</b> (Intelligence Index, prezzi, velocità, arene per immagini, video e voce)?
+  const aaHint = aa_key_set ? "" : `<div class="lb-hint owner-only">Vuoi anche <b>Artificial Analysis</b> (Intelligence Index, prezzi, velocità, arene per immagini, video e voce)?
     Crea una chiave gratuita (<a href="https://artificialanalysis.ai/documentation" target="_blank" rel="noopener">istruzioni</a>) e incollala nelle <a href="#" id="lbOpenSettings">impostazioni</a>.</div>`;
 
   const entries = state.lbEntries[board.id];
@@ -589,20 +591,20 @@ function renderDrawer(m) {
         </a>`).join("") : `<div class="muted">Aggiunto manualmente.</div>`}
     </div>
 
-    <div class="d-section"><h5>Correggi classificazione</h5>
+    <div class="d-section owner-only"><h5>Correggi classificazione</h5>
       <div class="edit-row">
         <label>Categoria<select data-edit="category">${Object.entries(meta.categories).map(([k, v]) => `<option value="${k}" ${k === m.category ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
         <label>Licenza<select data-edit="license_type">${Object.entries(meta.license_types).map(([k, v]) => `<option value="${k}" ${k === (m.license_type || "unknown") ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
       </div>
     </div>
 
-    <div class="d-section"><h5>Note personali</h5>
+    <div class="d-section owner-only"><h5>Note personali</h5>
       <textarea id="notes" rows="3" placeholder="Appunti, prove fatte, impressioni…">${esc(m.notes || "")}</textarea>
     </div>
 
     <div class="d-foot">
       <span>Aggiunto ${esc(relTime(m.first_seen))} · aggiornato ${esc(relTime(m.updated_at))}</span>
-      <button class="btn small danger" data-delete="${m.id}">Elimina</button>
+      <button class="btn small danger owner-only" data-delete="${m.id}">Elimina</button>
     </div>`;
 }
 
@@ -678,7 +680,7 @@ async function pollScan() {
   $("#btnCancel").style.display = s.running ? "" : "none";
   $("#btnScan").disabled = s.running;
   $("#scanTitle").textContent = s.running
-    ? (s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
+    ? (s.phase === "queued" ? "In coda" : s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
     : "Ricerca completata";
   $("#scanSub").textContent = s.running
     ? (s.current || "") + ` · ${s.added} nuovi modelli`
@@ -711,7 +713,35 @@ async function checkHealth() {
   return c;
 }
 
+function openCloudInfo() {
+  const owner = window.CLOUD.isOwner;
+  $("#cloudInfo").innerHTML = `
+    <p>Questo è il catalogo pubblicato di <b>AI Lister</b>. ${owner
+      ? "Sei collegato come <b>proprietario</b>: puoi avviare ricerche, importare cataloghi e modificare i modelli."
+      : "Puoi consultare catalogo e classifiche ed esportare i dati; per avviare ricerche e modificare serve l'account proprietario (pulsante <b>Accedi</b>)."}</p>
+    <p>Le ricerche vengono eseguite dall'app AI Lister installata sul PC del proprietario: l'indicatore accanto al titolo
+      mostra se è accesa. Impostazioni, chiavi e Claude CLI si gestiscono da lì.</p>
+    <p class="path"><a href="https://github.com/mirkosampo/AI_Lister" target="_blank" rel="noopener">Codice sorgente su GitHub ↗</a></p>`;
+  $("#dlgCloud").showModal();
+}
+
+async function renderCloudBox() {
+  const box = $("#cloudBox");
+  let c;
+  try { c = await api("/api/cloud/status"); } catch { box.textContent = "Stato non disponibile."; return; }
+  box.innerHTML = !c.configured
+    ? `<span class="muted">Non configurato.</span> Per pubblicare il catalogo su Firebase vedi <code>docs/FIREBASE.md</code>.
+       ${c.last_error ? `<div class="path ko">${esc(c.last_error)}</div>` : ""}`
+    : `${c.last_error ? `<span class="ko">⚠ ${esc(c.last_error)}</span>` : `<span class="ok">✓ Collegato</span>`}
+       al progetto <b>${esc(c.project)}</b> · <a href="${esc(c.hosting_url)}" target="_blank" rel="noopener">apri il sito ↗</a>
+       <div class="path">${c.syncing ? "Sincronizzazione in corso…" : `Ultima sincronizzazione: ${c.last_sync ? esc(relTime(c.last_sync)) : "mai"}`}
+         ${c.current_job ? " · sta eseguendo una ricerca avviata dal sito" : ""}
+         · <a href="#" id="cloudSyncNow">sincronizza ora</a></div>`;
+}
+
 async function openSettings() {
+  if (window.CLOUD) return openCloudInfo();
+  renderCloudBox();
   const [s, c] = await Promise.all([api("/api/settings"), checkHealth()]);
   const f = $("#settingsForm");
   for (const [k, v] of Object.entries(s)) {
@@ -802,6 +832,38 @@ function bindEvents() {
     render();
   };
   $("#resetFilters").addEventListener("click", resetFilters);
+
+  // esporta / importa
+  $("#btnExport").addEventListener("click", async () => {
+    if (!window.CLOUD) { location.href = "/api/export"; return; }
+    const data = await api("/api/export");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(blob), download: `ai-lister-catalogo-${new Date().toISOString().slice(0, 10)}.json`,
+    });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+  $("#btnImport").addEventListener("click", () => $("#importFile").click());
+  $("#importFile").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { toast("Il file non è un JSON valido."); return; }
+    if (data.format !== "ai-lister-catalog") {
+      toast("File non riconosciuto: usa un catalogo esportato da AI Lister."); return;
+    }
+    const where = window.CLOUD ? "nel catalogo del sito" : "nel catalogo locale";
+    if (!confirm(`Unire ${where} il file «${file.name}»?\n\n${data.models.length} modelli, ${(data.videos || []).length} video, `
+      + `${Object.keys(data.deleted || {}).length} eliminazioni (esportato ${data.origin === "cloud" ? "dal sito" : "dall'app locale"} `
+      + `il ${fmtDate(data.exported_at)}).\n\nNiente viene cancellato senza motivo: per ogni modello vince la versione modificata più di recente.`)) return;
+    try {
+      const r = await api("/api/import", { method: "POST", body: data });
+      toast(`Importazione completata: ${r.added} nuovi, ${r.updated} aggiornati, ${r.deleted} eliminati, ${r.unchanged} invariati`);
+      refreshData();
+    } catch (err) { toast(err.message); }
+  });
 
   $("#sort").addEventListener("change", (e) => { state.sort = e.target.value; store("sort", state.sort); render(); });
   $("#layoutSeg").addEventListener("click", (e) => {
@@ -954,6 +1016,17 @@ function bindEvents() {
     }
   });
   $("#settingsForm").addEventListener("click", async (e) => {
+    if (e.target.id === "cloudSyncNow") {
+      e.preventDefault();
+      e.target.textContent = "sincronizzazione…";
+      try {
+        const r = await api("/api/cloud/sync", { method: "POST" });
+        toast(`Sincronizzato: ${r.added || 0} nuovi dal sito, ${r.updated || 0} aggiornati, ${r.writes} documenti scritti`);
+      } catch (err) { toast(err.message); }
+      renderCloudBox();
+      refreshData();
+      return;
+    }
     if (e.target.id !== "aaKeyRemove") return;
     e.preventDefault();
     if (!confirm("Rimuovere la chiave di Artificial Analysis?")) return;
@@ -984,8 +1057,20 @@ function bindEvents() {
   $("#sort").value = state.sort;
   $$("#layoutSeg button").forEach((b) => b.classList.toggle("active", b.dataset.layout === state.layout));
   bindEvents();
+  if (window.FIREBASE_CONFIG) {
+    // modalità sito: i dati arrivano da Firestore e si aggiornano in tempo reale
+    $("#content").innerHTML = `<div class="empty"><div class="spinner" style="margin:0 auto"></div><p>Caricamento del catalogo…</p></div>`;
+    try {
+      const { create } = await import("/static/cloud.js");
+      window.CLOUD = await create(window.FIREBASE_CONFIG);
+      window.CLOUD.onChange(() => refreshData());
+    } catch (err) {
+      $("#content").innerHTML = `<div class="empty"><div class="big">⚠️</div><h3>Impossibile caricare il catalogo</h3><p>${esc(err.message)}</p></div>`;
+      return;
+    }
+  }
   await loadAll();
-  checkHealth();
+  if (!window.CLOUD) checkHealth();
   // se una ricerca era già in corso (es. pagina ricaricata), riaggancia il pannello
   const s = await api("/api/scan/status?since=0");
   if (s.running) {

@@ -454,6 +454,7 @@ class Refresher:
     def __init__(self):
         self._lock = threading.Lock()
         self.state = {"running": False, "started_at": None, "finished_at": None, "log": [], "boards": 0}
+        self.on_finish: list = []
 
     def _log(self, msg: str, level: str = "info"):
         self.state["log"].append({"t": time.strftime("%H:%M:%S"), "msg": msg, "level": level})
@@ -494,6 +495,11 @@ class Refresher:
             self._log(f"Fatto: {self.state['boards']} classifiche, {matched} modelli del catalogo collegati.", "success")
         finally:
             self.state.update(running=False, finished_at=db.now())
+            for callback in self.on_finish:
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 refresher = Refresher()

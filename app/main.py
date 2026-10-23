@@ -1,4 +1,5 @@
 import json
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from . import analyzer, db, leaderboards, taxonomy, youtube
 from .config import STATIC_DIR, ensure_dirs, get_secret, load_settings, save_settings, set_secret
+from .cloud import agent
 from .leaderboards import refresher
 from .scanner import scanner
 
@@ -16,6 +18,8 @@ from .scanner import scanner
 async def lifespan(_app: FastAPI):
     ensure_dirs()
     db.init()
+    # se c'è la chiave Firebase, l'app fa da motore per il sito pubblicato
+    agent.start()
     # classifiche più vecchie di 24 ore: aggiornamento in background all'avvio
     if refresher.is_stale():
         refresher.start()
@@ -74,6 +78,7 @@ def patch_model(model_id: int, fields: dict):
     if model and ("name" in fields or "aliases" in fields):
         db.match_leaderboards()
         model = db.get_model(model_id)
+    agent.request_sync("modifica")
     if not model:
         raise HTTPException(404)
     return model
@@ -82,14 +87,49 @@ def patch_model(model_id: int, fields: dict):
 @app.delete("/api/models/{model_id}")
 def delete_model(model_id: int):
     db.delete_model(model_id)
+    agent.request_sync("eliminazione")
     return {"ok": True}
 
 
 @app.get("/api/export")
 def export():
-    body = json.dumps(db.list_models(), ensure_ascii=False, indent=2)
+    body = json.dumps(db.export_catalog(origin="local"), ensure_ascii=False, indent=2)
+    name = f"ai-lister-catalogo-{db.now()[:10]}.json"
     return Response(body, media_type="application/json",
-                    headers={"Content-Disposition": 'attachment; filename="ai_models.json"'})
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.post("/api/import")
+def import_catalog(data: dict):
+    try:
+        stats = db.import_catalog(data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    agent.request_sync("importazione")
+    return stats
+
+
+# ---------- Firebase ----------
+
+@app.get("/api/cloud/status")
+def cloud_status():
+    return agent.status()
+
+
+@app.post("/api/cloud/sync")
+def cloud_sync():
+    if not agent.state["configured"]:
+        raise HTTPException(400, "Firebase non configurato")
+    stats = agent.sync()
+    if stats is None:
+        raise HTTPException(500, agent.state.get("last_error") or "Sincronizzazione non riuscita")
+    return stats
+
+
+@app.get("/firebase-config.js")
+def firebase_config_stub():
+    # sul sito Firebase questo file contiene la configurazione web; in locale l'app gira in modalità locale
+    return Response("// AI Lister in modalità locale\n", media_type="application/javascript")
 
 
 # ---------- canali e video ----------
@@ -103,7 +143,9 @@ def channels():
 def add_channel(req: ChannelRequest):
     if not req.value.strip():
         raise HTTPException(400, "Canale vuoto")
-    return db.add_channel(req.value)
+    channel = db.add_channel(req.value)
+    agent.request_sync("canale aggiunto")
+    return channel
 
 
 @app.patch("/api/channels/{channel_id}")
@@ -202,6 +244,9 @@ def put_settings(values: dict):
     if key is not None:
         set_secret("ARTIFICIAL_ANALYSIS_API_KEY", key)
     save_settings(values)
+    if "cloud_owner_email" in values and agent.state["configured"]:
+        # aggiorna subito chi può modificare il sito
+        threading.Thread(target=agent._heartbeat, daemon=True).start()
     return _settings_view()
 
 

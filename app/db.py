@@ -105,6 +105,11 @@ CREATE TABLE IF NOT EXISTS lb_entries (
 CREATE INDEX IF NOT EXISTS idx_lb_entries_board ON lb_entries(board_id, rank);
 CREATE INDEX IF NOT EXISTS idx_lb_entries_model ON lb_entries(model_id);
 CREATE INDEX IF NOT EXISTS idx_lb_entries_norm ON lb_entries(norm);
+-- modelli eliminati: servono perché import e sincronizzazione non li facciano ricomparire
+CREATE TABLE IF NOT EXISTS deleted_models (
+    slug TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL
+);
 """
 
 JSON_FIELDS = ("aliases", "tags", "modalities_in", "modalities_out", "key_features", "availability", "links")
@@ -118,6 +123,17 @@ EDITABLE_FIELDS = ("name", "starred", "notes") + SCALAR_FIELDS + JSON_FIELDS
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_ts(value: str | None) -> datetime:
+    """Confronta timestamp scritti da Python ('…+00:00') e da JavaScript ('…Z', con millisecondi)."""
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def slugify(text: str) -> str:
@@ -366,6 +382,8 @@ def upsert_model(data: dict, video_id: str | None, timestamp_sec: int | None = N
                 f"INSERT INTO models ({cols}) VALUES ({', '.join('?' for _ in values)})", tuple(values.values())
             )
             model_id = conn().execute("SELECT last_insert_rowid()").fetchone()[0]
+            # un modello eliminato che ricompare in un video nuovo torna nel catalogo
+            conn().execute("DELETE FROM deleted_models WHERE slug = ?", (values["slug"],))
             created = True
         else:
             model_id = row["id"]
@@ -416,8 +434,174 @@ def update_model(model_id: int, fields: dict) -> dict | None:
 
 def delete_model(model_id: int):
     with _lock:
+        row = conn().execute("SELECT slug FROM models WHERE id = ?", (model_id,)).fetchone()
+        if row:
+            conn().execute("INSERT OR REPLACE INTO deleted_models (slug, deleted_at) VALUES (?, ?)", (row["slug"], now()))
         conn().execute("DELETE FROM models WHERE id = ?", (model_id,))
         conn().commit()
+
+
+# ---------- esportazione / importazione ----------
+#
+# Formato portabile usato da "Esporta"/"Importa", in locale e sul sito Firebase, e dalla sincronizzazione.
+# Le fonti dei modelli sono compatte ({video_id, timestamp_sec}) e rimandano all'elenco `videos`.
+
+CATALOG_FORMAT = "ai-lister-catalog"
+CATALOG_VERSION = 1
+MODEL_EXPORT_FIELDS = ("slug", "name", "starred", "notes", "first_seen", "updated_at") + SCALAR_FIELDS + JSON_FIELDS
+VIDEO_EXPORT_FIELDS = ("id", "title", "url", "published_at", "duration", "thumbnail", "status", "summary",
+                       "models_found", "discovered_at", "processed_at")
+
+
+def export_catalog(origin: str = "local", include_rankings: bool = False) -> dict:
+    with _lock:
+        c = conn()
+        models = [_row(r) for r in c.execute("SELECT * FROM models ORDER BY first_seen, id")]
+        sources: dict[int, list] = {}
+        for r in c.execute("SELECT model_id, video_id, timestamp_sec FROM model_sources ORDER BY video_id"):
+            sources.setdefault(r["model_id"], []).append({"video_id": r["video_id"], "timestamp_sec": r["timestamp_sec"]})
+        channels = {r["id"]: dict(r) for r in c.execute("SELECT * FROM channels ORDER BY added_at")}
+        videos = [dict(r) for r in c.execute("SELECT * FROM videos ORDER BY COALESCE(published_at, discovered_at)")]
+        deleted = {r["slug"]: r["deleted_at"] for r in c.execute("SELECT * FROM deleted_models")}
+    rankings = model_rankings() if include_rankings else {}
+    out_models = []
+    for m in models:
+        item = {f: m.get(f) for f in MODEL_EXPORT_FIELDS}
+        item["sources"] = sources.get(m["id"], [])
+        if include_rankings:
+            item["id"] = m["id"]
+            item["rankings"] = rankings.get(m["id"], [])
+        out_models.append(item)
+    return {
+        "format": CATALOG_FORMAT,
+        "version": CATALOG_VERSION,
+        "origin": origin,
+        "exported_at": now(),
+        "models": out_models,
+        "videos": [{**{f: v.get(f) for f in VIDEO_EXPORT_FIELDS},
+                    "channel_handle": (channels.get(v["channel_id"]) or {}).get("handle")} for v in videos],
+        "channels": [{"id": ch["id"], "handle": ch["handle"], "name": ch["name"], "url": ch["url"],
+                      "enabled": bool(ch["enabled"]), "added_at": ch["added_at"], "last_scan_at": ch["last_scan_at"]}
+                     for ch in channels.values()],
+        "deleted": deleted,
+    }
+
+
+def _empty(value) -> bool:
+    return value is None or value == "" or value == []
+
+
+def import_catalog(data: dict) -> dict:
+    """Unisce un catalogo esportato a quello locale, senza perdere nulla.
+
+    - modelli nuovi: aggiunti; modelli già presenti: per i campi singoli vince la versione modificata più di recente
+      (`updated_at`), i campi vuoti vengono comunque riempiti; liste, link e fonti vengono uniti;
+    - eliminazioni: un modello viene rimosso solo se è stato eliminato dopo la sua ultima modifica;
+    - video e canali mancanti vengono aggiunti; un video analizzato altrove non verrà rianalizzato.
+    """
+    if data.get("format") != CATALOG_FORMAT:
+        raise ValueError("File non riconosciuto: non è un catalogo esportato da AI Lister.")
+    if int(data.get("version") or 0) > CATALOG_VERSION:
+        raise ValueError("Il file proviene da una versione più recente di AI Lister: aggiorna l'app.")
+    stats = {"added": 0, "updated": 0, "unchanged": 0, "deleted": 0, "skipped_deleted": 0,
+             "videos": 0, "channels": 0}
+    with _lock:
+        c = conn()
+        # canali
+        handles = {r["handle"]: r["id"] for r in c.execute("SELECT id, handle FROM channels")}
+        for ch in data.get("channels") or []:
+            if ch.get("handle") and ch["handle"] not in handles:
+                c.execute("INSERT INTO channels (handle, name, url, enabled, added_at, last_scan_at) VALUES (?, ?, ?, ?, ?, ?)",
+                          (ch["handle"], ch.get("name") or ch["handle"], ch.get("url") or normalize_handle(ch["handle"])[1],
+                           1 if ch.get("enabled", True) else 0, ch.get("added_at") or now(), ch.get("last_scan_at")))
+                handles[ch["handle"]] = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+                stats["channels"] += 1
+        # video
+        for v in data.get("videos") or []:
+            if not v.get("id"):
+                continue
+            row = c.execute("SELECT * FROM videos WHERE id = ?", (v["id"],)).fetchone()
+            channel_id = handles.get(v.get("channel_handle"))
+            if row is None:
+                c.execute(
+                    f"INSERT INTO videos (channel_id, {', '.join(VIDEO_EXPORT_FIELDS)}) VALUES (?, {', '.join('?' for _ in VIDEO_EXPORT_FIELDS)})",
+                    (channel_id, *[v.get(f) if f != "status" or v.get(f) in ("done", "new", "error") else "new"
+                                   for f in VIDEO_EXPORT_FIELDS]),
+                )
+                stats["videos"] += 1
+            elif v.get("status") == "done" and row["status"] != "done":
+                c.execute("UPDATE videos SET status = 'done', error = NULL, summary = ?, models_found = ?, processed_at = ? WHERE id = ?",
+                          (v.get("summary"), v.get("models_found") or 0, v.get("processed_at"), v["id"]))
+        # eliminazioni
+        local_deleted = {r["slug"]: r["deleted_at"] for r in c.execute("SELECT * FROM deleted_models")}
+        for slug, deleted_at in (data.get("deleted") or {}).items():
+            row = c.execute("SELECT id, updated_at FROM models WHERE slug = ?", (slug,)).fetchone()
+            if row and parse_ts(deleted_at) >= parse_ts(row["updated_at"]):
+                c.execute("DELETE FROM models WHERE id = ?", (row["id"],))
+                stats["deleted"] += 1
+            if parse_ts(deleted_at) > parse_ts(local_deleted.get(slug)):
+                c.execute("INSERT OR REPLACE INTO deleted_models (slug, deleted_at) VALUES (?, ?)", (slug, deleted_at))
+                local_deleted[slug] = deleted_at
+        # modelli
+        video_ids = {r[0] for r in c.execute("SELECT id FROM videos")}
+        for m in data.get("models") or []:
+            name = (m.get("name") or "").strip()
+            slug = m.get("slug") or slugify(name)
+            if not name or not slug:
+                continue
+            if slug in local_deleted and parse_ts(local_deleted[slug]) >= parse_ts(m.get("updated_at")):
+                stats["skipped_deleted"] += 1
+                continue
+            row = c.execute("SELECT * FROM models WHERE slug = ?", (slug,)).fetchone() \
+                or _find_model(slug, [name] + list(m.get("aliases") or []))
+            if row is None:
+                values = {
+                    "slug": slug, "name": name, "starred": 1 if m.get("starred") else 0, "notes": m.get("notes"),
+                    "first_seen": m.get("first_seen") or now(), "updated_at": m.get("updated_at") or now(),
+                    **{f: m.get(f) for f in SCALAR_FIELDS},
+                    **{f: json.dumps(m.get(f) or [], ensure_ascii=False) for f in JSON_FIELDS},
+                }
+                c.execute(f"INSERT INTO models ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})",
+                          tuple(values.values()))
+                model_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+                stats["added"] += 1
+            else:
+                model_id = row["id"]
+                newer = parse_ts(m.get("updated_at")) > parse_ts(row["updated_at"])
+                updates = {}
+                for f in ("name",) + SCALAR_FIELDS:
+                    new = m.get(f)
+                    if _empty(new) or new == row[f]:
+                        continue
+                    if newer or _empty(row[f]):
+                        updates[f] = new
+                if newer:
+                    # campi personali: anche il valore "vuoto" più recente vince (es. preferito tolto)
+                    if bool(m.get("starred")) != bool(row["starred"]):
+                        updates["starred"] = 1 if m.get("starred") else 0
+                    if (m.get("notes") or "") != (row["notes"] or ""):
+                        updates["notes"] = m.get("notes")
+                for f in JSON_FIELDS:
+                    old = json.loads(row[f] or "[]")
+                    merged = _merge_links(old, m.get(f) or []) if f == "links" else _merge_list(old, m.get(f) or [])
+                    if merged != old:
+                        updates[f] = json.dumps(merged, ensure_ascii=False)
+                if parse_ts(m.get("first_seen")) < parse_ts(row["first_seen"]) and m.get("first_seen"):
+                    updates["first_seen"] = m["first_seen"]
+                if updates:
+                    updates["updated_at"] = m.get("updated_at") if newer else row["updated_at"]
+                    sets = ", ".join(f"{k} = ?" for k in updates)
+                    c.execute(f"UPDATE models SET {sets} WHERE id = ?", (*updates.values(), model_id))
+                    stats["updated"] += 1
+                else:
+                    stats["unchanged"] += 1
+            for s in m.get("sources") or []:
+                if s.get("video_id") in video_ids:
+                    c.execute("INSERT OR IGNORE INTO model_sources (model_id, video_id, timestamp_sec) VALUES (?, ?, ?)",
+                              (model_id, s["video_id"], s.get("timestamp_sec")))
+        c.commit()
+    match_leaderboards()
+    return stats
 
 
 # ---------- classifiche ----------

@@ -16,6 +16,8 @@ class Scanner:
         self._proc: subprocess.Popen | None = None
         self._cancel = threading.Event()
         self._aborted = False
+        # funzioni chiamate al termine di ogni ricerca (es. sincronizzazione con Firebase)
+        self.on_finish: list = []
         self.log_lines: list[dict] = []
         self.state = self._idle_state()
 
@@ -96,6 +98,11 @@ class Scanner:
                 "success",
             )
             s.update(running=False, phase="idle", current=None, finished_at=datetime.now().isoformat(timespec="seconds"))
+            for callback in self.on_finish:
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _manual_queue(self, video_ids: list[str]) -> list[dict]:
         queue = []

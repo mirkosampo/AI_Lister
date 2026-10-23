@@ -6,6 +6,14 @@ data/
 .env.*
 !.env.example
 
+# Firebase: sito generato (contiene la configurazione web del progetto), cache e progetto locale
+build/
+.firebase/
+.firebaserc
+firebase-debug.log
+firestore-debug.log
+*service-account*.json
+
 # Python
 .venv/
 venv/

@@ -26,7 +26,10 @@ Claude estrae ogni modello presentato, lo classifica e, se vuoi, verifica i dati
 - **Più canali**: aggiungi, disattiva o rimuovi canali dalla scheda *Canali*; con **＋ Video** analizzi anche singoli video di qualsiasi canale.
 - **Correzioni manuali**: cambia categoria e licenza, aggiungi note personali, segna i preferiti, elimina voci.
 - **Log in tempo reale** durante la ricerca, con possibilità di annullare; nuovi tentativi automatici sugli errori temporanei.
-- **Esportazione** dell'intero catalogo in JSON.
+- **Esporta / Importa** l'intero catalogo (modelli, fonti, video, canali, preferiti, note, eliminazioni) in un file JSON,
+  con unione intelligente: per ogni modello vince la versione modificata più di recente.
+- **Versione online su Firebase**: catalogo e classifiche consultabili da qualsiasi dispositivo. Dopo il login con Google
+  puoi avviare ricerche dal sito, che le esegue il tuo PC. Vedi [Versione online](#versione-online-firebase).
 - Tema chiaro/scuro, layout responsive.
 
 ## Requisiti
@@ -177,6 +180,35 @@ Humanity's Last Exam, ARC Prize, SimpleBench, Vectara Hallucination, SWE-bench, 
 METR, BFCL, OSWorld, GAIA, OpenCompass, Open VLM, le arene di Artificial Analysis, TTS Arena, Open ASR, MTEB, OpenRouter Rankings.
 L'elenco si modifica in [`app/leaderboards.py`](app/leaderboards.py).
 
+## Versione online (Firebase)
+
+Il catalogo si può pubblicare su **Firebase Hosting** (piano gratuito):
+
+- **chiunque abbia il link** consulta catalogo, classifiche e video ed esporta i dati;
+- **il proprietario**, dopo il login con Google, avvia ricerche, aggiorna le classifiche, gestisce i canali, importa
+  cataloghi, segna preferiti, scrive note (visibili solo a lui) e corregge o elimina modelli;
+- **le ricerche le esegue l'app sul tuo PC**, che fa da motore: il sito le mette in coda, l'app le prende in pochi secondi
+  e il log compare in tempo reale anche sul sito. Accanto al titolo un indicatore mostra se il PC è *online*.
+  Se è spento, la ricerca parte alla successiva accensione dell'app;
+- catalogo locale e online restano allineati da soli (sincronizzazione in entrambe le direzioni).
+
+Configurazione passo passo, struttura dei dati e regole di sicurezza: **[docs/FIREBASE.md](docs/FIREBASE.md)**.
+In breve: crei il database Firestore e un account di servizio, attivi il login Google, imposti il tuo account come
+proprietario nell'app e lanci `deploy_firebase.bat`.
+
+## Esporta e importa
+
+**Esporta**, nella barra sopra il catalogo, scarica `ai-lister-catalogo-AAAA-MM-GG.json` con tutto il catalogo.
+**Importa** unisce un file esportato (dall'app o dal sito) a quello corrente, senza sovrascrivere alla cieca:
+
+- i modelli nuovi vengono aggiunti;
+- per quelli già presenti vince la versione modificata più di recente, e i campi vuoti vengono comunque riempiti;
+- liste, link e video di provenienza si sommano;
+- un modello eliminato non ricompare importando un file più vecchio.
+
+Serve per backup, per spostare il catalogo su un altro PC, o per aggiornare la versione locale con quella online
+(e viceversa) anche senza sincronizzazione.
+
 ## Impostazioni (icona ⚙)
 
 | Opzione | Default | Note |
@@ -189,6 +221,7 @@ L'elenco si modifica in [`app/leaderboards.py`](app/leaderboards.py).
 | Timeout per video | 1800 s | |
 | Percorso Claude CLI | automatico | |
 | Chiave API Artificial Analysis | — | facoltativa, salvata in `.env` |
+| Account Google proprietario | — | solo per il sito Firebase: chi può modificare e avviare ricerche |
 
 Le impostazioni sono salvate in `data/settings.json`, le chiavi in `.env`.
 
@@ -201,6 +234,7 @@ Tutto resta sul tuo computer, nella cartella `data/` (esclusa da git):
 | `data/ai_lister.db` | database SQLite: modelli, video, canali, note, preferiti e classifiche scaricate |
 | `data/settings.json` | impostazioni |
 | `data/claude_work/` | cartella di lavoro vuota in cui gira la CLI |
+| `data/firebase-service-account.json` | chiave dell'account di servizio Firebase (solo se usi la versione online) |
 
 Per un backup copia `data/ai_lister.db` ad app chiusa: alla chiusura e dopo ogni video il journal SQLite viene consolidato
 nel file principale. In alternativa usa **Esporta** per scaricare il catalogo in JSON.
@@ -229,17 +263,23 @@ app/
   youtube.py     elenco video, dettagli, trascrizioni (yt-dlp, youtube-transcript-api)
   analyzer.py    prompt, JSON Schema e invocazione di `claude -p`
   leaderboards.py  directory delle leaderboard e importazione da Arena, Epoch AI, Artificial Analysis
+  cloud.py       collegamento con Firebase: sincronizzazione, coda di lavori, stato del PC
   db.py          SQLite e logica di unione dei modelli
   taxonomy.py    categorie, licenze, tipi di link
   config.py      percorsi e impostazioni
-static/          interfaccia web (HTML/CSS/JS, nessuna build)
-docs/            documentazione tecnica e screenshot
+static/          interfaccia web (HTML/CSS/JS, nessuna build); cloud.js = modalità sito Firebase
+firebase/        regole e indici di Firestore
+scripts/         deploy_firebase.py (pubblicazione del sito)
+docs/            documentazione tecnica (ARCHITETTURA.md, FIREBASE.md) e screenshot
 start.bat        avvio su Windows
+deploy_firebase.bat  pubblica il sito su Firebase
 ```
 
 ## Privacy
 
-- Il server ascolta solo su `127.0.0.1`: non è raggiungibile da altri dispositivi.
+- Il server ascolta solo su `127.0.0.1`: non è raggiungibile da altri dispositivi. La versione online è separata:
+  pubblica su Firestore solo il catalogo (non le note, che restano private) e le regole di sicurezza permettono
+  di modificare soltanto all'account proprietario.
 - Le connessioni esterne sono verso YouTube (metadati e trascrizioni), Claude tramite la CLI (con la verifica web attiva Claude visita anche le pagine dei progetti),
   Hugging Face ed Epoch AI per le classifiche e, solo se hai impostato la chiave, Artificial Analysis.
 - Nessuna chiave è salvata nel codice: il login resta gestito dalla CLI, e i segreti facoltativi (token di lunga durata, chiave Artificial Analysis) stanno in `.env`, escluso da git.

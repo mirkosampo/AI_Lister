@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30
 yt-dlp>=2025.1.1
 youtube-transcript-api>=1.2
 pyarrow>=15
+google-cloud-firestore>=2.16

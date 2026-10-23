@@ -29,6 +29,8 @@ DEFAULTS = {
     "language": "italiano",
     "transcript_max_chars": 150000,
     "timeout_sec": 1800,
+    # Account Google che può modificare il sito su Firebase (scritto in Firestore, mai nel codice)
+    "cloud_owner_email": "",
 }
 
 _lock = threading.Lock()

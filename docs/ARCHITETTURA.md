@@ -95,6 +95,49 @@ del nome o di un alias di un modello del catalogo. Ai modelli senza corrisponden
 
 `db.model_rankings()` restituisce per ogni modello la miglior posizione in ogni classifica; `/api/models` la include nel campo `rankings`.
 
+## Formato di esportazione
+
+`db.export_catalog()` e `db.import_catalog()` definiscono il formato portabile usato da *Esporta*/*Importa*
+(in locale e sul sito) e dalla sincronizzazione con Firebase:
+
+```json
+{
+  "format": "ai-lister-catalog", "version": 1, "origin": "local | cloud", "exported_at": "…",
+  "models":   [{ "slug": "…", "name": "…", "starred": 0, "notes": "…", "first_seen": "…", "updated_at": "…",
+                 "category": "…", "license_type": "…", "…": "tutti i campi del modello",
+                 "sources": [{ "video_id": "…", "timestamp_sec": 125 }] }],
+  "videos":   [{ "id": "…", "channel_handle": "@…", "title": "…", "status": "done", "…": "…" }],
+  "channels": [{ "handle": "@…", "name": "…", "url": "…", "enabled": true }],
+  "deleted":  { "slug": "data di eliminazione" }
+}
+```
+
+Regole di unione, identiche in Python (`import_catalog`) e in JavaScript (`importCatalog` in `static/cloud.js`):
+
+- i modelli si riconoscono per `slug`; in locale anche per nome o alias;
+- campi singoli: vince la versione con `updated_at` più recente, ma un campo vuoto viene sempre riempito;
+  per preferito e note vince la versione più recente anche se il valore è "vuoto" (preferito tolto, nota cancellata);
+- liste, link (per URL) e fonti (per video) vengono uniti; `first_seen` diventa la data più vecchia;
+- `deleted`: un modello viene rimosso solo se è stato eliminato dopo la sua ultima modifica, e un file vecchio
+  non lo fa ricomparire. Se un modello eliminato riappare in un video nuovo, torna nel catalogo;
+- video e canali mancanti vengono aggiunti; un video già analizzato altrove non viene rianalizzato.
+
+I timestamp di Python (`…+00:00`) e di JavaScript (`…Z`) si confrontano dopo la conversione in data (`db.parse_ts`).
+
+## Firebase (`app/cloud.py`, `static/cloud.js`)
+
+Descritto in [FIREBASE.md](FIREBASE.md). In sintesi:
+
+- `CloudAgent` si attiva se trova la chiave dell'account di servizio. Sincronizza il catalogo, pubblica metadati
+  e classifiche, scrive il battito e prende i lavori dalla collezione `jobs`. Si aggancia a `scanner.on_finish`
+  e `refresher.on_finish` per sincronizzare al termine di ogni lavoro.
+- Sul sito `index.html` carica `/firebase-config.js`, generato dallo script di pubblicazione; in locale il server
+  restituisce un file vuoto. Se c'è la configurazione, `app.js` importa `static/cloud.js`, che risponde alle stesse
+  chiamate `/api/…` leggendo Firestore con ascolto in tempo reale: l'interfaccia è unica per entrambe le modalità.
+  Le azioni del proprietario diventano scritture su Firestore (modifiche, importazione) o lavori in coda (ricerche,
+  classifiche, canali).
+- Classi sul `body`: `cloud`, più `owner` oppure `viewer`. Gli elementi con classe `owner-only` sono nascosti ai visitatori.
+
 ## Database (`app/db.py`)
 
 SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la connessione è condivisa tra il thread della ricerca e le richieste HTTP.
@@ -107,6 +150,7 @@ SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la co
 | `model_sources` | relazione modello ↔ video con `timestamp_sec` |
 | `lb_boards` | una riga per classifica: fonte, nome, categoria, metrica, unità, attribuzione, data dei dati, numero di voci |
 | `lb_entries` | voci delle classifiche con `norm` (nome normalizzato) e `model_id` (collegamento al catalogo, `NULL` se assente) |
+| `deleted_models` | slug e data dei modelli eliminati, per propagare le eliminazioni a importazioni e sincronizzazione |
 
 Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti `processing` tornano `new`.
 
@@ -129,7 +173,10 @@ Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti
 | GET | `/api/models` | tutti i modelli con le fonti (video) |
 | PATCH | `/api/models/{id}` | modifica campi (`starred`, `notes`, `category`, `license_type`, …) |
 | DELETE | `/api/models/{id}` | elimina un modello |
-| GET | `/api/export` | catalogo completo in JSON (download) |
+| GET | `/api/export` | catalogo completo nel [formato di esportazione](#formato-di-esportazione) (download) |
+| POST | `/api/import` | unisce un catalogo esportato; restituisce `added`, `updated`, `unchanged`, `deleted`, `skipped_deleted`, `videos`, `channels` |
+| GET | `/api/cloud/status` | collegamento a Firebase: progetto, ultima sincronizzazione, errori, lavoro in corso |
+| POST | `/api/cloud/sync` | sincronizza subito con Firestore |
 | GET / POST | `/api/channels` | elenco / aggiunta (`{"value": "@canale"}` o URL) |
 | PATCH / DELETE | `/api/channels/{id}` | attiva/disattiva, rinomina / rimuove |
 | GET | `/api/videos` | video scoperti con stato |

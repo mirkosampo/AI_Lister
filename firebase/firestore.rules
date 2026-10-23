@@ -1,0 +1,58 @@
+rules_version = '2';
+
+// AI Lister: il catalogo è pubblico in lettura; solo il proprietario (account Google elencato in /owners,
+// collezione scritta dall'app locale e non leggibile da altri) può modificarlo e avviare lavori.
+// L'app locale usa un account di servizio, che non è soggetto a queste regole.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/owners/$(request.auth.token.email.lower()));
+    }
+
+    // catalogo: chunk-00…15 (modelli), videos, channels, deleted
+    match /catalog/{doc} {
+      allow read: if true;
+      allow write: if isOwner();
+    }
+
+    // note personali
+    match /private/{doc} {
+      allow read, write: if isOwner();
+    }
+
+    // scritti solo dall'app locale
+    match /meta/{doc} {
+      allow read: if true;
+    }
+    match /leaderboards/{doc} {
+      allow read: if true;
+    }
+    match /agent/{doc} {
+      allow read: if true;
+    }
+
+    // serve al sito per sapere se l'utente collegato è il proprietario
+    match /owners/{email} {
+      allow get: if signedIn() && request.auth.token.email.lower() == email && isOwner();
+    }
+
+    // coda di lavori eseguiti dall'app locale
+    match /jobs/{job} {
+      allow read: if true;
+      allow create: if isOwner()
+        && request.resource.data.status == 'queued'
+        && request.resource.data.keys().hasOnly(['type', 'params', 'status', 'created_at'])
+        && request.resource.data.type in
+             ['scan', 'videos', 'leaderboards', 'add_channel', 'update_channel', 'delete_channel'];
+      // dal sito si può solo chiedere l'annullamento
+      allow update: if isOwner()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cancel_requested']);
+    }
+  }
+}
