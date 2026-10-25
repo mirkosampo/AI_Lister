@@ -37,6 +37,9 @@ const state = {
   repoSources: new Set(),
   selectedRepoId: null,
   ghPollTimer: null,
+  // canali: elenco a tendina degli ultimi video
+  openChannels: new Set(),
+  channelVideos: {},
 };
 
 // ---------- utilità ----------
@@ -75,8 +78,11 @@ function recall(key, fallback) {
 }
 
 const CAT_HUES = {
-  llm: 255, coding: 210, agent: 280, multimodal: 190, image: 330, image_edit: 345, video: 10, audio_music: 35,
-  speech: 50, "3d": 140, world_model: 165, avatar: 300, robotics: 100, upscale: 230, embedding: 180, science: 120, other: 220,
+  llm: 255, coding: 210, agent: 280, multimodal: 190, image: 330, image_edit: 345, video: 10, audio_music: 35, audio: 25,
+  speech: 50, "3d": 140, depth: 150, segmentation: 160, detection: 175, vision: 200, ocr: 215, world_model: 165,
+  avatar: 300, robotics: 100, upscale: 230, embedding: 180, translation: 60, nlp: 240, tabular: 75, timeseries: 85,
+  games_rl: 315, bio: 115, medical: 355, science: 120, safety: 0, web_dev: 195, web_design: 290, graphic_design: 320,
+  dev_tools: 220, productivity: 45, other: 220,
 };
 const catColor = (c) => `hsl(${CAT_HUES[c] ?? 220} 70% 55%)`;
 const catLabel = (c) => state.meta?.categories[c] || c || "—";
@@ -128,6 +134,14 @@ async function refreshData() {
   ]);
   Object.assign(state, { meta, models, videos, channels, lb, repos });
   state.lbEntries = {};
+  // stato di analisi aggiornato nei video dei canali aperti (senza rileggere YouTube)
+  for (const list of Object.values(state.channelVideos)) {
+    if (!Array.isArray(list)) continue;
+    for (const v of list) {
+      const row = videos.find((x) => x.id === v.id);
+      if (row) Object.assign(v, { status: row.status, models_found: row.models_found });
+    }
+  }
   renderSidebar();
   render();
   const editing = $("#drawer").contains(document.activeElement);
@@ -241,7 +255,7 @@ function rankBadge(m, maxRank = 20) {
 
 function fmtScore(score, unit) {
   if (score == null) return "—";
-  if (unit === "elo") return Math.round(score).toString();
+  if (unit === "elo" || unit === "int") return Math.round(score).toLocaleString("it-IT");
   if (unit === "%") return score.toFixed(1) + "%";
   if (unit === "$") return "$" + Math.round(score).toLocaleString("it-IT");
   if (unit === "min") return score >= 60 ? (score / 60).toFixed(1) + " h" : Math.round(score) + " min";
@@ -258,6 +272,33 @@ function miniLinks(m) {
     .slice(0, 4)
     .map((l) => `<a class="lk" href="${esc(l.url)}" target="_blank" rel="noopener" data-stop>${LINK_SHORT[l.type]}</a>`)
     .join("");
+}
+
+// riquadro "Non trovi …? Cerca online": solo in locale o per il proprietario sul sito (classe owner-only)
+function lookupBox(kind, noResults) {
+  const q = state.q.trim();
+  if (q.length < 2) return "";
+  const what = kind === "repo" ? "repository" : "modello";
+  const cloudNote = window.CLOUD ? " La ricerca viene eseguita dall'app sul tuo PC." : "";
+  return `<div class="lookup-box owner-only ${noResults ? "strong" : ""}">
+    <div><b>${noResults ? `Nessun ${what} «${esc(q)}» in catalogo.` : `Non è il ${what} che cerchi?`}</b>
+      <span class="muted">Claude può cercarlo online${kind === "repo" ? " (anche incollando owner/repo o il link GitHub)" : ""} e aggiungerlo alla lista.${cloudNote}</span></div>
+    <button class="btn primary small" data-lookup="${kind}">🔎 Cerca «${esc(q.length > 40 ? q.slice(0, 40) + "…" : q)}» online</button>
+  </div>${noResults ? `<div class="empty viewer-only"><div class="big">🔍</div><h3>Nessun risultato</h3><p>Prova a cambiare ricerca o filtri.</p></div>` : ""}`;
+}
+
+async function startLookup(kind) {
+  const query = state.q.trim();
+  if (query.length < 2) return;
+  state.pendingLookup = query;
+  await startScan({ query, kind }, "/api/lookup");
+}
+
+function originText(m) {
+  if (m.origin === "lookup") return `Aggiunto con la ricerca online «${esc(m.origin_detail || "")}».`;
+  if (m.origin === "hf_trending") return `Trovato tra i modelli di tendenza su Hugging Face (<a href="https://huggingface.co/${esc(m.origin_detail || "")}" target="_blank" rel="noopener">${esc(m.origin_detail || "")}</a>).`;
+  if (m.origin === "import") return "Aggiunto da un'importazione.";
+  return "Aggiunto manualmente.";
 }
 
 function emptyState() {
@@ -280,10 +321,11 @@ function renderModels() {
     info += `<span class="filter-pill">dal video: ${esc((v?.title || "").slice(0, 40))}… <button id="clearVideoFilter">✕</button></span>`;
   }
   $("#resultInfo").innerHTML = info;
-  if (!list.length) return emptyState();
+  if (!list.length) return lookupBox("model", true) + (state.q.trim().length >= 2 ? "" : emptyState());
+  const lookup = lookupBox("model", false);
 
   if (state.layout === "table") {
-    return `<div class="table-wrap"><table><thead><tr>
+    return lookup + `<div class="table-wrap"><table><thead><tr>
       <th></th><th>Modello</th><th>Categoria</th><th>Licenza</th><th>Parametri</th><th>Classifica</th><th>Rilascio</th><th>Link</th></tr></thead><tbody>
       ${list.map((m) => `<tr data-id="${m.id}">
         <td><button class="star ${m.starred ? "on" : ""}" data-star="${m.id}">★</button></td>
@@ -296,7 +338,7 @@ function renderModels() {
       </tbody></table></div>`;
   }
 
-  return `<div class="grid">${list.map((m) => `
+  return lookup + `<div class="grid">${list.map((m) => `
     <article class="card" data-id="${m.id}" style="--cat-color:${catColor(m.category)}">
       <div class="card-head">
         <div>
@@ -360,10 +402,55 @@ function renderChannels() {
           <div class="cm">${esc(c.handle)} · ${c.video_count} video scoperti · ${c.analyzed_count || 0} analizzati
             ${c.last_scan_at ? ` · ultima ricerca ${esc(relTime(c.last_scan_at))}` : ""}</div>
         </div>
+        <button class="btn small" data-latest-ch="${c.id}" aria-expanded="${state.openChannels.has(c.id)}">
+          ${state.openChannels.has(c.id) ? "▴" : "▾"} Ultimi video</button>
         <button class="btn small owner-only" data-scan-ch="${c.id}">Cerca solo qui</button>
         <button class="btn small danger owner-only" data-del-ch="${c.id}">Rimuovi</button>
-      </div>`).join("")}
+      </div>
+      ${state.openChannels.has(c.id) ? renderChannelVideos(c) : ""}`).join("")}
     </div>`;
+}
+
+const VIDEO_STATUS = { done: "Analizzato", new: "Da analizzare", error: "Errore", processing: "In analisi" };
+
+function renderChannelVideos(c) {
+  const data = state.channelVideos[c.id];
+  if (!data || data === "loading") {
+    if (!data) loadChannelVideos(c.id);
+    return `<div class="ch-videos"><div class="muted ch-loading"><span class="spinner tiny"></span> Leggo gli ultimi video da YouTube…</div></div>`;
+  }
+  if (data.error) {
+    return `<div class="ch-videos"><div class="muted">⚠ ${esc(data.error)} <a href="#" data-latest-reload="${c.id}">riprova</a></div></div>`;
+  }
+  if (!data.length) return `<div class="ch-videos"><div class="muted">Nessun video trovato.</div></div>`;
+  return `<div class="ch-videos">
+    ${window.CLOUD ? `<div class="muted ch-note">Sul sito vedi i video già scoperti dall'app sul PC; l'elenco completo da YouTube è nell'app locale.</div>` : ""}
+    ${data.map((v) => `
+      <div class="ch-video">
+        <a href="${esc(v.url)}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(v.thumbnail || `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`)}" alt=""></a>
+        <div class="grow">
+          <a class="vt" href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.title || v.id)}</a>
+          <div class="vs">
+            ${v.published_at ? `<span title="${esc(fmtDate(v.published_at))}">${esc(fmtDate(v.published_at))} · ${esc(relTime(v.published_at))}</span>` : ""}
+            ${v.duration ? `<span>${fmtTs(v.duration)}</span>` : ""}
+            <span class="status ${v.status || "none"}">${v.status ? VIDEO_STATUS[v.status] || v.status : "Mai analizzato"}</span>
+            ${v.status === "done" && v.models_found ? `<a href="#" data-show-video="${esc(v.id)}">${v.models_found} ${v.models_found === 1 ? "modello" : "modelli"}</a>` : ""}
+          </div>
+        </div>
+        <button class="btn small owner-only ${v.status === "done" ? "ghost" : "primary"}" data-analyze="${esc(v.id)}">
+          ${v.status === "done" ? "Rianalizza" : "Analizza"}</button>
+      </div>`).join("")}
+  </div>`;
+}
+
+async function loadChannelVideos(id) {
+  state.channelVideos[id] = "loading";
+  try {
+    state.channelVideos[id] = await api(`/api/channels/${id}/latest?limit=20`);
+  } catch (err) {
+    state.channelVideos[id] = { error: err.message };
+  }
+  if (state.view === "channels") render();
 }
 
 // ---------- repository GitHub ----------
@@ -375,7 +462,8 @@ const SORTS = {
   repos: [["recent", "Aggiunti di recente"], ["growth", "In crescita (stelle/giorno)"], ["stars", "Più stelle"],
     ["pushed", "Aggiornati di recente"], ["name", "Nome A→Z"]],
 };
-const REPO_SOURCES = { video: "Dai video", trending: "Tendenze GitHub" };
+const REPO_SOURCES = { video: "Dai video", trending: "Tendenze GitHub", lookup: "Dalla ricerca" };
+const repoHasSource = (r, k) => (k === "video" ? r.from_video : k === "trending" ? r.from_trending : r.from_lookup);
 const LANG_COLORS = { Python: "#3572A5", TypeScript: "#3178c6", JavaScript: "#f1e05a", Rust: "#dea584", Go: "#00ADD8",
   "C++": "#f34b7d", C: "#555555", "Jupyter Notebook": "#DA5B0B", Java: "#b07219", Swift: "#F05138", Kotlin: "#A97BFF",
   Shell: "#89e051", "C#": "#178600", Zig: "#ec915c", Dart: "#00B4AB", HTML: "#e34c26", Cuda: "#3A4E3A" };
@@ -406,7 +494,7 @@ function repoFiltered(ignore = "") {
     if (ignore !== "cat" && state.category !== "all" && r.category !== state.category) return false;
     if (ignore !== "kind" && state.repoKinds.size && !state.repoKinds.has(r.kind || "other")) return false;
     if (ignore !== "src" && state.repoSources.size
-      && !((state.repoSources.has("video") && r.from_video) || (state.repoSources.has("trending") && r.from_trending))) return false;
+      && ![...state.repoSources].some((k) => repoHasSource(r, k))) return false;
     if (tokens.length) {
       const h = repoHaystack(r);
       if (!tokens.every((t) => h.includes(t))) return false;
@@ -445,7 +533,7 @@ function renderRepoSidebar() {
   }).join("");
   const forSrc = repoFiltered("src");
   $("#availChips").innerHTML = Object.entries(REPO_SOURCES).map(([k, v]) => {
-    const n = forSrc.filter((r) => (k === "video" ? r.from_video : r.from_trending)).length;
+    const n = forSrc.filter((r) => repoHasSource(r, k)).length;
     return `<button class="chip ${state.repoSources.has(k) ? "on" : ""}" data-src="${k}">${esc(v)} <span class="count">${n}</span></button>`;
   }).join("");
 }
@@ -470,6 +558,8 @@ function renderRepos() {
     info += `<span class="filter-pill">dal video: ${esc((v?.title || "").slice(0, 40))}… <button id="clearVideoFilter">✕</button></span>`;
   }
   $("#resultInfo").innerHTML = info;
+  if (!list.length && state.q.trim().length >= 2) return lookupBox("repo", true);
+  const lookup = lookupBox("repo", false);
   if (!list.length) {
     return total
       ? `<div class="empty"><div class="big">🔍</div><h3>Nessun risultato</h3><p>Prova a cambiare ricerca o filtri.</p><button class="btn" id="emptyReset">Azzera filtri</button></div>`
@@ -478,7 +568,7 @@ function renderRepos() {
         <button class="btn primary owner-only" id="emptyGithub">Cerca le tendenze su GitHub</button></div>`;
   }
   if (state.layout === "table") {
-    return `<div class="table-wrap"><table><thead><tr>
+    return lookup + `<div class="table-wrap"><table><thead><tr>
       <th></th><th>Repository</th><th>Categoria</th><th>Tipo</th><th class="num">Stelle</th><th class="num">Crescita</th><th>Linguaggio</th><th>Aggiornato</th></tr></thead><tbody>
       ${list.map((r) => `<tr data-repo="${r.id}">
         <td><button class="star ${r.starred ? "on" : ""}" data-repo-star="${r.id}">★</button></td>
@@ -490,7 +580,7 @@ function renderRepos() {
         <td class="meta-small">${esc(relTime(r.pushed_at))}</td></tr>`).join("")}
       </tbody></table></div>`;
   }
-  return `<div class="grid">${list.map((r) => `
+  return lookup + `<div class="grid">${list.map((r) => `
     <article class="card" data-repo="${r.id}" style="--cat-color:${catColor(r.category)}">
       <div class="card-head">
         <div>
@@ -648,6 +738,9 @@ const LB_COLUMNS = {
   price: { label: "$ / 1M token", fmt: (v) => (v == null ? "—" : "$" + v.toFixed(2)) },
   speed: { label: "Token/s", fmt: (v) => (v == null ? "—" : Math.round(v)) },
   ttft: { label: "Latenza", fmt: (v) => (v == null ? "—" : v.toFixed(2) + " s") },
+  likes: { label: "Like", fmt: (v) => (v == null ? "—" : Number(v).toLocaleString("it-IT")) },
+  downloads: { label: "Download", fmt: (v) => (v == null ? "—" : fmtStars(v)) },
+  params: { label: "Parametri", fmt: (v) => (v == null ? "—" : v >= 1 ? `${v.toFixed(1)}B` : `${Math.round(v * 1000)}M`) },
 };
 
 function lbHeader() {
@@ -721,7 +814,7 @@ function renderBoards() {
           ? `<span class="ci">+${Math.round(e.ci_high - e.score)}/−${Math.round(e.score - e.ci_low)}</span>` : "";
         return `<tr class="${e.model_id ? "in-catalog" : ""} ${state.lbHighlight === e.model_id && e.model_id ? "hl" : ""}" ${e.model_id ? `data-model="${e.model_id}"` : ""}>
           <td class="num rank-cell">${e.rank ?? "—"}</td>
-          <td><b>${esc(e.name)}</b>${e.model_id ? ` <span class="badge in-cat" title="Apri la scheda nel catalogo">nel catalogo</span>` : ""}</td>
+          <td><b>${e.extra?.url ? `<a href="${esc(e.extra.url)}" target="_blank" rel="noopener" data-stop>${esc(e.name)}</a>` : esc(e.name)}</b>${e.model_id ? ` <span class="badge in-cat" title="Apri la scheda nel catalogo">nel catalogo</span>` : ""}</td>
           <td class="muted">${esc(e.organization || "")}</td>
           <td>${e.is_open == null ? '<span class="muted">—</span>' : e.is_open ? `<span class="badge lic" style="--lic:var(--lic-open_weights)" title="${esc(e.license || "")}">Open</span>` : `<span class="badge lic" style="--lic:var(--lic-closed)">Chiuso</span>`}</td>
           <td class="num"><b>${fmtScore(e.score, board.unit)}</b>${ci}</td>
@@ -884,7 +977,7 @@ function renderDrawer(m) {
           <img loading="lazy" src="${esc(s.thumbnail || `https://i.ytimg.com/vi/${s.video_id}/hqdefault.jpg`)}" alt="">
           <div><div class="st">${esc(s.title || s.video_id)}</div>
           <div class="ss">${esc(s.channel_name || "")}${s.published_at ? " · " + esc(fmtDate(s.published_at)) : ""}${s.timestamp_sec != null ? " · ▶ " + fmtTs(s.timestamp_sec) : ""}</div></div>
-        </a>`).join("") : `<div class="muted">Aggiunto manualmente.</div>`}
+        </a>`).join("") : `<div class="muted">${originText(m)}</div>`}
     </div>
 
     <div class="d-section owner-only"><h5>Correggi classificazione</h5>
@@ -978,7 +1071,8 @@ async function pollScan() {
   $("#btnCancel").style.display = s.running ? "" : "none";
   $("#btnScan").disabled = s.running;
   $("#scanTitle").textContent = s.running
-    ? (s.phase === "queued" ? "In coda" : s.phase === "github" ? "GitHub: repo di tendenza e dati" : s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
+    ? (s.phase === "queued" ? "In coda" : s.phase === "lookup" ? "Ricerca online" : s.phase === "hf" ? "Hugging Face: modelli di tendenza"
+      : s.phase === "github" ? "GitHub: repo di tendenza e dati" : s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
     : "Ricerca completata";
   $("#scanSub").textContent = s.running
     ? (s.current || "") + ` · ${s.added} nuovi modelli`
@@ -989,8 +1083,15 @@ async function pollScan() {
     state.lastCounts = counts;
     refreshData();
   }
-  if (s.running) state.pollTimer = setTimeout(pollScan, 1500);
-  else if (s.finished_at && s.started_at) toast(`Ricerca completata: ${s.added} nuovi modelli`);
+  if (s.running) { state.pollTimer = setTimeout(pollScan, 1500); return; }
+  const res = s.lookup_result;
+  if (res && state.pendingLookup && res.query === state.pendingLookup) {
+    state.pendingLookup = null;
+    await refreshData();
+    if (res.model_ids?.length) { state.view = "models"; renderSidebar(); render(); openDrawer(res.model_ids[0]); }
+    else if (res.repo_ids?.length) { state.view = "repos"; fillSort(); renderSidebar(); render(); openRepoDrawer(res.repo_ids[0]); }
+    toast(res.model_ids?.length || res.repo_ids?.length ? `Aggiunto al catalogo: ${res.message || res.query}` : `Nessun risultato: ${res.message || ""}`);
+  } else if (s.finished_at && s.started_at) toast(`Ricerca completata: ${s.added} nuovi modelli`);
 }
 
 // ---------- impostazioni & salute ----------
@@ -1070,6 +1171,11 @@ async function openSettings() {
 // ---------- eventi ----------
 
 function bindEvents() {
+  $("#search").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const btn = $("#content .lookup-box.strong [data-lookup]");
+    if (btn && getComputedStyle(btn).display !== "none") btn.click();
+  });
   $("#search").addEventListener("input", (e) => {
     state.q = e.target.value;
     // nelle classifiche la ricerca filtra la tabella; altrove porta al catalogo
@@ -1216,6 +1322,8 @@ function bindEvents() {
     if (repoCard) { openRepoDrawer(+repoCard.dataset.repo); return; }
     if (t.closest("#emptyScan")) { startScan(); return; }
     if (t.closest("#emptyGithub")) { startGithub(); return; }
+    const lk = t.closest("[data-lookup]");
+    if (lk) { startLookup(lk.dataset.lookup); return; }
     if (t.closest("#emptyReset")) { resetFilters(); return; }
     if (t.closest("#clearVideoFilter")) { state.videoFilter = null; renderSidebar(); render(); return; }
 
@@ -1238,6 +1346,15 @@ function bindEvents() {
       render();
       return;
     }
+    const latest = t.closest("[data-latest-ch]");
+    if (latest) {
+      const id = +latest.dataset.latestCh;
+      state.openChannels.has(id) ? state.openChannels.delete(id) : state.openChannels.add(id);
+      render();
+      return;
+    }
+    const reload = t.closest("[data-latest-reload]");
+    if (reload) { e.preventDefault(); delete state.channelVideos[+reload.dataset.latestReload]; render(); return; }
     const sc = t.closest("[data-scan-ch]");
     if (sc) { startScan({ channel_ids: [+sc.dataset.scanCh] }); return; }
     const dc = t.closest("[data-del-ch]");

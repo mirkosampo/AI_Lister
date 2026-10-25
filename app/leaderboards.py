@@ -18,7 +18,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 
-from . import db
+from . import db, hf, taxonomy
 from .config import get_secret
 
 USER_AGENT = "AI-Lister (+https://github.com/mirkosampo/AI_Lister)"
@@ -33,7 +33,8 @@ GROUPS = {
     "agent": "Agenti & uso del computer",
     "multimodal": "Visione & multimodale",
     "media": "Immagini & video",
-    "speech": "Voce",
+    "speech": "Voce & musica",
+    "vision": "Visione: segmentazione, rilevamento, OCR",
     "embedding": "Embedding & retrieval",
     "usage": "Utilizzo reale & prezzi",
 }
@@ -134,6 +135,28 @@ DIRECTORY = [
      "group": "speech", "integrated": None, "method": "Benchmark",
      "description": "Riconoscimento vocale: tasso di errore sulle parole (WER) e velocità su più dataset."},
 
+    {"name": "3D Arena", "url": "https://huggingface.co/spaces/dylanebert/3d-arena", "group": "media",
+     "integrated": None, "method": "Voti umani alla cieca",
+     "description": "Confronti alla cieca tra modelli di generazione 3D (immagine/testo → 3D)."},
+    {"name": "Music Arena", "url": "https://music-arena.org", "group": "speech", "integrated": None,
+     "method": "Voti umani alla cieca",
+     "description": "Arena aperta per i modelli di generazione musicale, con votazioni degli ascoltatori."},
+    {"name": "OCRBench", "url": "https://huggingface.co/spaces/echo840/ocrbench-leaderboard", "group": "vision",
+     "integrated": None, "method": "Benchmark",
+     "description": "Capacità di lettura del testo (OCR) e di comprensione dei documenti dei modelli multimodali."},
+    {"name": "Hugging Face · modelli di tendenza", "url": "https://huggingface.co/models?sort=trending",
+     "group": "general", "integrated": "hf", "method": "Popolarità recente",
+     "description": "I modelli più seguiti del momento sul Hub, per ognuna delle ~50 attività: segmentazione, "
+                    "profondità, 3D, musica, voce, rilevamento oggetti, traduzione, serie temporali e tutte le altre."},
+    {"name": "Hugging Face · paper di tendenza", "url": "https://huggingface.co/papers/trending", "group": "general",
+     "integrated": None, "method": "Popolarità recente",
+     "description": "I paper di IA più discussi del giorno, spesso con modello e codice collegati."},
+    {"name": "Open LLM Leaderboard (archivio)", "url": "https://huggingface.co/spaces/open-llm-leaderboard/open_llm_leaderboard",
+     "group": "general", "integrated": None, "method": "Benchmark",
+     "description": "Storica classifica dei modelli open su benchmark standard; non più aggiornata, utile come archivio."},
+    {"name": "GPU-Poor LLM Arena", "url": "https://huggingface.co/spaces/k-mktr/gpu-poor-llm-arena", "group": "general",
+     "integrated": None, "method": "Voti umani alla cieca",
+     "description": "Arena dedicata ai modelli piccoli che girano su hardware modesto."},
     {"name": "MTEB", "url": "https://huggingface.co/spaces/mteb/leaderboard", "group": "embedding",
      "integrated": None, "method": "Benchmark",
      "description": "Massive Text Embedding Benchmark: modelli di embedding su ricerca, classificazione, "
@@ -149,6 +172,8 @@ SOURCES = {
               "attribution": "Dati: Arena (arena.ai), lmarena-ai/leaderboard-dataset, licenza CC-BY 4.0"},
     "epoch": {"name": "Epoch AI", "url": "https://epoch.ai/benchmarks",
               "attribution": "Dati: Epoch AI (epoch.ai), licenza CC-BY 4.0"},
+    "hf": {"name": "Hugging Face", "url": "https://huggingface.co/models?sort=trending",
+           "attribution": "Dati: Hugging Face Hub (huggingface.co), punteggio di tendenza basato su like e download recenti"},
     "aa": {"name": "Artificial Analysis", "url": "https://artificialanalysis.ai",
            "attribution": "Dati: Artificial Analysis (artificialanalysis.ai)"},
 }
@@ -445,7 +470,39 @@ def fetch_aa(log) -> list[tuple[dict, list[dict]]]:
     return boards
 
 
-FETCHERS = {"arena": fetch_arena, "epoch": fetch_epoch, "aa": fetch_aa}
+# ---------- Hugging Face ----------
+
+def fetch_hf(log) -> list[tuple[dict, list[dict]]]:
+    """Una classifica per ogni attività del Hub: i 50 modelli con il punteggio di tendenza più alto."""
+    boards = []
+    for pos, (task, (label, category)) in enumerate(taxonomy.HF_TASKS.items()):
+        try:
+            items = hf.models(pipeline_tag=task, sort="trendingScore", limit=50)
+        except Exception as exc:  # noqa: BLE001
+            log(f"Hugging Face · {label}: {exc}", "warn")
+            continue
+        entries = [{
+            "rank": i, "name": m["id"], "organization": m.get("author"), "license": hf.license_of(m), "is_open": 1,
+            "score": float(m.get("trendingScore") or 0), "votes": None,
+            "extra": {"likes": m.get("likes"), "downloads": m.get("downloads"),
+                      "release_date": (m.get("createdAt") or "")[:10] or None,
+                      "params": hf.params_of(m), "url": f"https://huggingface.co/{m['id']}"},
+        } for i, m in enumerate(items, start=1)]
+        if not entries:
+            continue
+        boards.append(({
+            "id": f"hf:{task}", "source": "hf", "name": f"Hugging Face · {label}", "category": category,
+            "metric": "Tendenza", "unit": "int",
+            "description": "I modelli più di tendenza su Hugging Face per questa attività (like e download degli ultimi giorni).",
+            "url": f"https://huggingface.co/models?pipeline_tag={task}&sort=trending",
+            "attribution": SOURCES["hf"]["attribution"], "columns": ["likes", "downloads", "params", "release_date"],
+            "position": 400 + pos, "publish_date": datetime.now().date().isoformat(),
+        }, entries))
+    log(f"Hugging Face: {len(boards)} classifiche per attività")
+    return boards
+
+
+FETCHERS = {"arena": fetch_arena, "epoch": fetch_epoch, "hf": fetch_hf, "aa": fetch_aa}
 
 
 # ---------- aggiornamento in background ----------

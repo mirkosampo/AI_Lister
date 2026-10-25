@@ -33,10 +33,22 @@ DEFAULTS = {
     "cloud_owner_email": "",
     # Repository GitHub di tendenza: inclusi nelle ricerche (al massimo ogni 12 ore)
     "github_trending": True,
-    "github_topics": "llm, ai-agents, generative-ai, diffusion-models, text-to-speech, text-to-video, mcp, rag",
+    "github_topics": ("llm, ai-agents, generative-ai, diffusion-models, text-to-speech, text-to-video, mcp, rag, "
+                      "comfyui, computer-vision, ai-tools, developer-tools, nextjs, react, tailwindcss, web-design, "
+                      "design-system, ui-components, figma-plugin, blender-addon, graphic-design, vscode-extension, "
+                      "chrome-extension"),
+    # Modelli di tendenza su Hugging Face: inclusi nelle ricerche (al massimo ogni 12 ore)
+    "hf_trending": True,
+    "hf_days": 45,
+    "hf_min_likes": 30,
+    "hf_per_task": 2,
     "github_days": 14,
     "github_min_stars": 100,
     "github_per_topic": 10,
+}
+
+OLD_DEFAULTS = {
+    "github_topics": ["llm, ai-agents, generative-ai, diffusion-models, text-to-speech, text-to-video, mcp, rag"],
 }
 
 _lock = threading.Lock()
@@ -83,7 +95,12 @@ def load_settings() -> dict:
                 data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 data = {}
-        return {**DEFAULTS, **{k: v for k, v in data.items() if k in DEFAULTS}}
+        merged = {**DEFAULTS, **{k: v for k, v in data.items() if k in DEFAULTS}}
+        # un valore uguale a un vecchio predefinito (mai personalizzato) passa al predefinito attuale
+        for key, old_values in OLD_DEFAULTS.items():
+            if merged.get(key) in old_values:
+                merged[key] = DEFAULTS[key]
+        return merged
 
 
 def save_settings(updates: dict) -> dict:

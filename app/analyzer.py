@@ -122,7 +122,7 @@ OUTPUT_SCHEMA = {
                     "existing_slug": _str_or_null("slug of the matching entry in EXISTING MODELS, if the same model"),
                     "aliases": {"type": "array", "items": {"type": "string"}},
                     "developer": _str_or_null("company, lab or authors"),
-                    "category": {"type": "string", "enum": list(taxonomy.CATEGORIES)},
+                    "category": {"type": "string", "enum": list(taxonomy.MODEL_CATEGORIES)},
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "modalities_in": {"type": "array", "items": {"type": "string", "enum": taxonomy.MODALITIES}},
                     "modalities_out": {"type": "array", "items": {"type": "string", "enum": taxonomy.MODALITIES}},
@@ -175,6 +175,35 @@ REPO_ITEM_SCHEMA = {
     "required": ["url", "category", "kind", "summary"],
 }
 OUTPUT_SCHEMA["properties"]["repos"] = {"type": "array", "items": REPO_ITEM_SCHEMA}
+MODEL_ITEM_SCHEMA = OUTPUT_SCHEMA["properties"]["models"]["items"]
+
+# ricerca di un modello o repository specifico (barra di ricerca)
+LOOKUP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "found": {"type": "boolean", "description": "true if at least one matching AI model/repository was identified"},
+        "message": {"type": "string", "description": "short explanation for the user (what was found, or why nothing)"},
+        "models": {"type": "array", "items": MODEL_ITEM_SCHEMA},
+        "repos": {"type": "array", "items": REPO_ITEM_SCHEMA},
+    },
+    "required": ["found", "message", "models", "repos"],
+}
+
+# valutazione dei modelli di tendenza su Hugging Face
+HF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "models": {
+            "type": "array",
+            "items": {**MODEL_ITEM_SCHEMA, "properties": {
+                **MODEL_ITEM_SCHEMA["properties"],
+                "hf_id": {"type": "string", "description": "the Hugging Face id exactly as given (owner/name)"},
+                "relevant": {"type": "boolean"},
+            }, "required": ["hf_id", "relevant", "name", "category", "license_type", "summary", "description", "links"]},
+        },
+    },
+    "required": ["models"],
+}
 
 TRENDING_SCHEMA = {
     "type": "object",
@@ -183,7 +212,7 @@ TRENDING_SCHEMA = {
             "type": "array",
             "items": {**REPO_ITEM_SCHEMA, "properties": {
                 **REPO_ITEM_SCHEMA["properties"],
-                "relevant": {"type": "boolean", "description": "true only if genuinely about AI/ML"},
+                "relevant": {"type": "boolean", "description": "true if notable and in scope (see prompt)"},
             }, "required": ["url", "relevant", "category", "kind", "summary"]},
         },
     },
@@ -238,13 +267,14 @@ RULES
 
 GITHUB REPOSITORIES (`repos`)
 - Also list every GitHub repository (github.com/owner/repo) linked in the description or presented in the video:
-  tools, apps, frameworks, agents, MCP servers, ComfyUI nodes, datasets, and the official code repos of the models above.
+  AI tools, apps, frameworks, agents, MCP servers, addons/plugins (ComfyUI nodes, Blender, Figma, VS Code, browser),
+  web development and web/graphic design projects, datasets, and the official code repos of the models above.
 - Skip sponsor repos and GitHub links that are not a repository (user profiles, orgs, topics).
 - `url` must be the exact repository URL (https://github.com/owner/repo), copied from the description or verified.
 - `kind`: {", ".join(f"{k} = {v}" for k, v in taxonomy.REPO_KIND_HINTS.items())}.
-- `summary`, `details` in {lang}; `category` from the same list as models.
+- `summary`, `details` in {lang}; `category` from the list below (the "repositories only" ones are allowed here).
 
-CATEGORIES (pick the single best one)
+CATEGORIES (pick the single best one; models cannot use the "repositories only" ones)
 {_bullets(taxonomy.CATEGORY_HINTS)}
 
 LICENSE TYPES
@@ -387,3 +417,41 @@ def run_analysis(
     if isinstance(structured, dict):
         return structured
     return _extract_json(str(result_event.get("result") or ""))
+
+
+# ---------- ricerca online di un modello o repository (barra di ricerca) ----------
+
+def build_lookup_prompt(query: str, kind: str, existing: list[dict], settings: dict) -> str:
+    lang = settings["language"]
+    existing_txt = "\n".join(f"{m['slug']} | {m['name']} | {m.get('developer') or '?'}" for m in existing) or "(vuoto)"
+    target = ("the GitHub repository (or repositories)" if kind == "repo"
+              else "the AI model (or closely related family of models)")
+    return f"""The user searched a personal AI catalog for: «{query}»
+It was not found. Use WebSearch and WebFetch to identify {target} the user most likely means, then return
+structured data so it can be added to the catalog.
+
+RULES
+- Identify the best match. Include at most 3 entries: the exact match plus, only if useful, closely related
+  variants (e.g. different sizes of the same release). Do not include unrelated or older models.
+- If the query is ambiguous, pick the most likely interpretation and explain it in `message`.
+- If you cannot find a real AI model/repository matching the query, return found=false, empty lists and explain.
+- Verify facts on primary sources (official blog/model card on Hugging Face/GitHub/arXiv). NEVER invent URLs or numbers;
+  unknown facts stay null/empty.
+- For models also list in `repos` their official GitHub repository if one exists. For repositories, `models` may be empty.
+- `existing_slug`: if a result is already in EXISTING MODELS (same name and version) put its slug.
+- `summary`, `description`, `key_features`, `details`, `message` MUST be written in {lang}. Names, tags and enums in English.
+- Repository `kind`: {", ".join(f"{k} = {v}" for k, v in taxonomy.REPO_KIND_HINTS.items())}.
+
+CATEGORIES (models cannot use the "repositories only" ones)
+{_bullets(taxonomy.CATEGORY_HINTS)}
+
+LICENSE TYPES
+{_bullets(taxonomy.LICENSE_HINTS)}
+
+AVAILABILITY values: {", ".join(taxonomy.AVAILABILITY)}
+LINK TYPES: {", ".join(taxonomy.LINK_TYPES)}
+
+EXISTING MODELS (slug | name | developer)
+{existing_txt}
+
+Return the result as structured output matching the provided JSON schema."""

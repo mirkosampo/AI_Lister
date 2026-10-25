@@ -5,7 +5,7 @@ import time
 import traceback
 from datetime import datetime
 
-from . import analyzer, db, github, youtube
+from . import analyzer, db, github, hf, youtube
 from .config import load_settings
 
 
@@ -26,6 +26,7 @@ class Scanner:
         return {
             "running": False, "phase": "idle", "current": None, "done": 0, "total": 0,
             "added": 0, "updated": 0, "repos_added": 0, "errors": 0, "started_at": None, "finished_at": None,
+            "lookup": None, "lookup_result": None,
         }
 
     # ---------- API pubblica ----------
@@ -34,6 +35,7 @@ class Scanner:
         return {**self.state, "log": self.log_lines[since:], "log_size": len(self.log_lines)}
 
     def start(self, *, channel_ids: list[int] | None = None, limit: int | None = None,
+              lookup: dict | None = None,
               video_ids: list[str] | None = None, force: bool = False) -> bool:
         with self._lock:
             if self.state["running"]:
@@ -41,10 +43,11 @@ class Scanner:
             self._cancel.clear()
             self._aborted = False
             self.log_lines = []
-            self.state = {**self._idle_state(), "running": True, "phase": "discovery",
-                          "started_at": datetime.now().isoformat(timespec="seconds")}
+            self.state = {**self._idle_state(), "running": True, "phase": "lookup" if lookup else "discovery",
+                          "lookup": lookup, "started_at": datetime.now().isoformat(timespec="seconds")}
             self._thread = threading.Thread(
-                target=self._run, args=(channel_ids, limit, video_ids, force), daemon=True
+                target=self._run_lookup if lookup else self._run,
+                args=(lookup,) if lookup else (channel_ids, limit, video_ids, force), daemon=True,
             )
             self._thread.start()
             return True
@@ -88,6 +91,13 @@ class Scanner:
                 db.checkpoint()
             elif video_ids:
                 github.enrich(github.GitHub(), self._log)
+            # passo Hugging Face: al massimo ogni 12 ore, modelli di tendenza non ancora in catalogo
+            if not self._cancel.is_set() and not video_ids and hf.trending_due(settings):
+                self.state.update(phase="hf", current="Hugging Face")
+                stats = hf.discover(self._log, self._set_proc, cancel=self._cancel)
+                self.state["added"] += stats.get("added", 0)
+                self.state["updated"] += stats.get("updated", 0)
+                db.checkpoint()
         except Exception as exc:  # noqa: BLE001
             self._log(f"Errore inatteso: {exc}", "error")
             self._log(traceback.format_exc(), "debug")
@@ -148,10 +158,10 @@ class Scanner:
 
     RETRY_DELAYS = (30, 60, 120)
 
-    def _analyze_with_retry(self, prompt: str, settings: dict) -> dict:
+    def _analyze_with_retry(self, prompt: str, settings: dict, **kwargs) -> dict:
         for attempt, delay in enumerate((*self.RETRY_DELAYS, None), start=1):
             try:
-                return analyzer.run_analysis(prompt, settings, self._log, self._set_proc)
+                return analyzer.run_analysis(prompt, settings, self._log, self._set_proc, **kwargs)
             except analyzer.AnalysisError as exc:
                 if exc.kind != "transient" or delay is None or self._cancel.is_set():
                     raise
@@ -237,6 +247,91 @@ class Scanner:
         db.update_video(vid, status="done", processed_at=db.now(), models_found=added + updated,
                         summary=result.get("video_summary"))
         self._log(f"  ✔ {added} modelli nuovi, {updated} aggiornati · {repos_total} repository ({repos_new} nuovi)", "success")
+
+    # ---------- ricerca online dalla barra di ricerca ----------
+
+    def _run_lookup(self, lookup: dict):
+        """Cerca online un modello o repository non in catalogo e lo aggiunge. lookup = {query, kind: model|repo}."""
+        settings = load_settings()
+        query = (lookup.get("query") or "").strip()
+        kind = lookup.get("kind") or "model"
+        result = {"query": query, "kind": kind, "model_ids": [], "repo_ids": [], "message": ""}
+        self.state.update(total=1, current=f"«{query}»")
+        self._log(f"🔎 Ricerca online di «{query}»", "title")
+        try:
+            full = db.parse_repo(query) if kind == "repo" or "github.com/" in query else None
+            if full:
+                self._lookup_repo(full, settings, result)
+            else:
+                self._lookup_web(query, kind, settings, result)
+            self.state["done"] = 1
+        except Exception as exc:  # noqa: BLE001
+            if not self._cancel.is_set():
+                self.state["errors"] += 1
+                result["message"] = str(exc)
+                self._log(f"  ❌ {exc}", "error")
+        finally:
+            db.checkpoint()
+            try:
+                db.match_leaderboards()
+            except Exception:  # noqa: BLE001
+                pass
+            s = self.state
+            if self._cancel.is_set():
+                self._log("Ricerca annullata.", "warn")
+            self._log(f"🏁 Fine: {len(result['model_ids'])} modelli e {len(result['repo_ids'])} repository aggiunti o aggiornati",
+                      "success")
+            s.update(running=False, phase="idle", current=None, lookup_result=result,
+                     finished_at=datetime.now().isoformat(timespec="seconds"))
+            for callback in self.on_finish:
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _lookup_repo(self, full: str, settings: dict, result: dict):
+        """Repository indicato esplicitamente (owner/repo o URL): dati da GitHub, testi da Claude."""
+        gh = github.GitHub()
+        info = gh.repo(full)
+        if not info:
+            raise ValueError(f"il repository {full} non esiste su GitHub o è privato")
+        self._log(f"  🐙 {info['name']} · ★{info['stars']} · {info.get('language') or '?'}")
+        judged = github._classify([info], settings, self._log, self._set_proc)
+        j = judged[0] if judged else {"category": "other", "kind": "other", "summary": info.get("description") or ""}
+        repo_id, created = db.upsert_repo({**j, "url": info["url"], "name": info["name"]}, "lookup")
+        db.update_repo_github(full, info)
+        result["repo_ids"].append(repo_id)
+        result["message"] = f"{info['name']} {'aggiunto' if created else 'aggiornato'}."
+        self._log(f"  {'＋' if created else '↻'} {info['name']}  [{j.get('category')} · {j.get('kind')}]", "success")
+        self.state["repos_added"] += created
+
+    def _lookup_web(self, query: str, kind: str, settings: dict, result: dict):
+        """Modello (o repo descritto a parole): Claude cerca sul web e restituisce i dati per il catalogo."""
+        self._log(f"  🤖 Claude cerca sul web ({settings['model']})…")
+        prompt = analyzer.build_lookup_prompt(query, kind, db.model_index(), settings)
+        data = self._analyze_with_retry(prompt, settings, schema=analyzer.LOOKUP_SCHEMA, web=True)
+        result["message"] = data.get("message") or ""
+        if not data.get("found") or not (data.get("models") or data.get("repos")):
+            self._log(f"  ⚠ Nessun risultato: {result['message']}", "warn")
+            return
+        for m in data.get("models") or []:
+            try:
+                model_id, created = db.upsert_model(m, None, origin="lookup", origin_detail=query)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"  ⚠ modello scartato ({m.get('name')}): {exc}", "warn")
+                continue
+            result["model_ids"].append(model_id)
+            self.state["added" if created else "updated"] += 1
+            self._log(f"  {'＋' if created else '↻'} {m['name']}  [{m.get('category')} · {m.get('license_type')}]", "success")
+        for r in data.get("repos") or []:
+            repo_id, created = db.upsert_repo(r, "lookup")
+            if repo_id:
+                result["repo_ids"].append(repo_id)
+                self.state["repos_added"] += created
+                self._log(f"  🐙 {db.parse_repo(r['url'])}", "success")
+        if result["repo_ids"]:
+            github.enrich(github.GitHub(), self._log, limit=10)
+        self._log(f"  ℹ {result['message']}")
 
 
 scanner = Scanner()

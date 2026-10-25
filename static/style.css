@@ -368,6 +368,28 @@ dialog .hint { font-size: 12px; color: var(--text-3); }
 .spark-legend { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-3); }
 .tag[data-open-repo], .tag[data-open-model] { border: 1px solid var(--border); cursor: pointer; }
 
+/* ---------- canali: ultimi video ---------- */
+.ch-videos { margin: -4px 0 6px 52px; padding: 8px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.ch-video { display: flex; gap: 12px; align-items: center; padding: 6px 8px; border-radius: 10px; background: var(--bg-elev); border: 1px solid var(--border); }
+.ch-video img { width: 112px; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; background: var(--bg-sunk); flex: none; }
+.ch-video .vt { font-weight: 600; font-size: 13.5px; color: var(--text); }
+.ch-video .vs { font-size: 12px; color: var(--text-3); margin-top: 3px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.ch-video .grow { flex: 1; min-width: 0; }
+.status.none { color: var(--text-3); background: var(--bg-sunk); }
+.ch-loading, .ch-note { padding: 4px 6px; font-size: 12.5px; }
+@media (max-width: 900px) { .ch-videos { margin-left: 0; } .ch-video img { width: 84px; } }
+
+/* ---------- ricerca online dalla barra ---------- */
+.lookup-box {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+  padding: 10px 14px; margin-bottom: 14px; border-radius: var(--radius); border: 1px dashed var(--border-strong);
+  background: var(--bg-elev); font-size: 13.5px;
+}
+.lookup-box .muted { display: block; font-size: 12.5px; }
+.lookup-box.strong { border-style: solid; border-color: var(--accent); background: var(--accent-soft); padding: 16px 18px; }
+.viewer-only { display: none; }
+.viewer .viewer-only { display: block; }
+
 /* ---------- sito Firebase ---------- */
 body:not(.cloud) .cloud-only, body:not(.cloud) .agent-pill { display: none; }
 .viewer .owner-only { display: none !important; }

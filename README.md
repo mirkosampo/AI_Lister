@@ -16,7 +16,13 @@ Claude estrae ogni modello presentato, lo classifica e, se vuoi, verifica i dati
 ## Funzionalità
 
 - **Catalogo ricercabile**: ricerca istantanea su nome, sviluppatore, descrizione e tag (tasto `/`), vista a schede o tabella, vari ordinamenti.
-- **Filtri**: 17 categorie (LLM, immagini, video, voce, 3D, robotica…), tipo di licenza, disponibilità (locale, API, web app, demo…), preferiti.
+- **Ricerca online dalla barra**: se un modello o un repository non è in catalogo, un clic (o Invio) e Claude lo cerca
+  sul web, verifica i dati e lo aggiunge. Vedi [Ricerca online](#ricerca-online-dalla-barra).
+- **Tutti i tipi di modello**: 31 categorie, tra cui LLM, immagini, video, musica, audio, voce, 3D, profondità,
+  segmentazione, rilevamento oggetti e pose, OCR, traduzione, serie temporali, dati tabellari, biologia, medicina,
+  robotica e sicurezza. Si filtrano anche per licenza, disponibilità e preferiti.
+- **Modelli di tendenza su Hugging Face**: ogni 12 ore i modelli nuovi più seguiti per ognuna delle ~50 attività del Hub
+  vengono valutati da Claude e aggiunti al catalogo.
 - **Scheda dettagliata** per ogni modello: parametri (anche attivi per i MoE), contesto, architettura, dimensione su disco, VRAM,
   modalità di input/output, caratteristiche principali, link (Hugging Face, GitHub, paper, demo, sito…) e video in cui appare con link al minuto esatto.
 - **Repository GitHub**: i repo citati nei video (tool, app, framework, agenti, server MCP, codice dei modelli) e
@@ -26,7 +32,9 @@ Claude estrae ogni modello presentato, lo classifica e, se vuoi, verifica i dati
   (più 7 da [Artificial Analysis](https://artificialanalysis.ai) con una chiave gratuita), collegate ai modelli del catalogo,
   e una directory di altre ~30 leaderboard da consultare. Vedi [Classifiche](#classifiche).
 - **Aggiornamento incrementale**: i video già analizzati vengono saltati; se un modello riappare in un altro video la sua scheda viene arricchita, non duplicata.
-- **Più canali**: aggiungi, disattiva o rimuovi canali dalla scheda *Canali*; con **＋ Video** analizzi anche singoli video di qualsiasi canale.
+- **Più canali**: aggiungi, disattiva o rimuovi canali dalla scheda *Canali*. **Ultimi video** apre l'elenco cronologico
+  dei caricamenti di un canale, con lo stato di analisi e un pulsante per analizzarli uno per uno; con **＋ Video** analizzi
+  singoli video di qualsiasi canale.
 - **Correzioni manuali**: cambia categoria e licenza, aggiungi note personali, segna i preferiti, elimina voci.
 - **Log in tempo reale** durante la ricerca, con possibilità di annullare; nuovi tentativi automatici sugli errori temporanei.
 - **Esporta / Importa** l'intero catalogo (modelli, fonti, video, canali, preferiti, note, eliminazioni) in un file JSON,
@@ -136,18 +144,48 @@ Categorie: Linguaggio (LLM), Codice, Agenti & Computer use, Multimodale / Vision
 Generazione video, Musica & Audio, Voce (TTS / STT), 3D & Scene, World model, Avatar & Animazione, Robotica,
 Upscaling & Restauro, Embedding & Retrieval, Scienza & Ricerca, Altro. Si modificano in [`app/taxonomy.py`](app/taxonomy.py).
 
+## Ricerca online dalla barra
+
+Scrivi nella barra di ricerca. Se ciò che cerchi non è nel catalogo, compare il riquadro **Cerca «…» online**:
+cliccalo o premi **Invio**.
+
+- **Nella scheda Modelli**: Claude usa la ricerca web per identificare il modello, anche se il nome è scritto in modo
+  approssimativo, e ne verifica i dati sulle fonti ufficiali (model card, blog, paper). Aggiunge il modello,
+  eventualmente con le varianti strettamente collegate, e il suo repository GitHub. Alla fine si apre la scheda trovata.
+- **Nella scheda Repository**: incolla `owner/repo` o il link GitHub per aggiungerlo direttamente, con i dati di
+  GitHub e un riassunto di Claude; oppure descrivilo a parole e Claude lo cercherà.
+
+Il dettaglio indica "Aggiunto con la ricerca online «…»". Ogni ricerca consuma l'utilizzo di Claude, circa un minuto.
+**Sul sito Firebase** la ricerca online è disponibile solo con il login del proprietario: crea un lavoro che esegue
+l'app sul tuo PC. I visitatori possono cercare solo nel catalogo esistente.
+
+## Hugging Face
+
+Hugging Face è usato in due modi:
+
+- **Classifiche**: per ognuna delle 49 attività (segmentazione, image-to-3d, text-to-audio, profondità, rilevamento oggetti,
+  OCR, traduzione, serie temporali, reinforcement learning…) una classifica dei 50 modelli più di tendenza, con like,
+  download e parametri. Sono nella scheda *Classifiche*, raggruppate per categoria.
+- **Scoperta**: durante la ricerca, al massimo ogni 12 ore, l'app prende i modelli di tendenza creati negli ultimi
+  45 giorni con almeno 30 like (2 per attività, più i più seguiti in assoluto). Scarta copie quantizzate, adattatori e
+  fusioni, e fa valutare il resto a Claude, senza web, sui metadati del Hub: arrivano solo quelli rilevanti, con
+  scheda in italiano e link al paper. Parametri modificabili nelle impostazioni.
+
 ## Repository GitHub
 
 La scheda **Repository** elenca i progetti GitHub legati all'IA. Hanno le stesse funzioni dei modelli: ricerca,
 filtri per categoria, tipo (app, strumento, framework, codice di un modello, agente, server MCP, dataset, raccolta) e fonte,
-preferiti, note, correzioni, esporta/importa e sincronizzazione con il sito.
+preferiti, note, correzioni, esporta/importa e sincronizzazione con il sito. Oltre alle categorie dei modelli
+hanno categorie proprie: sviluppo web, web design e UI, grafica e design, strumenti per sviluppatori, produttività.
 
 Arrivano da due fonti, entrambe comprese nel pulsante **Cerca nuovi modelli**:
 
 1. **Video**: durante l'analisi Claude estrae anche ogni repository linkato nella descrizione o presentato nel video.
-2. **Tendenze GitHub**: al massimo ogni 12 ore l'app cerca, per ogni argomento impostato (`llm`, `ai-agents`,
-   `generative-ai`, `diffusion-models`, `text-to-speech`, `text-to-video`, `mcp`, `rag`), i repository creati negli ultimi
-   14 giorni con almeno 100 stelle. Usa l'[API di ricerca ufficiale](https://docs.github.com/en/rest/search/search),
+2. **Tendenze GitHub**: al massimo ogni 12 ore l'app cerca, per ogni argomento impostato, i repository creati negli
+   ultimi 14 giorni con almeno 100 stelle. Gli argomenti coprono IA (`llm`, `ai-agents`, `generative-ai`, `diffusion-models`,
+   `text-to-speech`, `text-to-video`, `mcp`, `rag`, `comfyui`, `computer-vision`, `ai-tools`), sviluppo web (`nextjs`,
+   `react`, `tailwindcss`), design (`web-design`, `design-system`, `ui-components`, `graphic-design`), addon
+   (`figma-plugin`, `blender-addon`, `vscode-extension`, `chrome-extension`) e strumenti (`developer-tools`). Usa l'[API di ricerca ufficiale](https://docs.github.com/en/rest/search/search),
    perché GitHub non offre un'API per la pagina Trending. I candidati nuovi vengono valutati da Claude in un'unica
    chiamata, senza ricerca web: scarta quelli non pertinenti (non verranno rivalutati) e scrive riassunto e categoria.
    Il pulsante **⟳ GitHub** nella scheda Repository la avvia subito.
@@ -299,13 +337,14 @@ app/
   leaderboards.py  directory delle leaderboard e importazione da Arena, Epoch AI, Artificial Analysis
   cloud.py       collegamento con Firebase: sincronizzazione, coda di lavori, stato del PC
   github.py      dati dall'API di GitHub e repository di IA in tendenza
+  hf.py          Hugging Face: modelli di tendenza per attività (classifiche e scoperta)
   db.py          SQLite e logica di unione dei modelli
   taxonomy.py    categorie, licenze, tipi di link
   config.py      percorsi e impostazioni
 static/          interfaccia web (HTML/CSS/JS, nessuna build); cloud.js = modalità sito Firebase
 firebase/        regole e indici di Firestore
 scripts/         deploy_firebase.py (pubblicazione del sito)
-docs/            documentazione tecnica (ARCHITETTURA.md, FIREBASE.md) e screenshot
+docs/            documentazione tecnica (ARCHITETTURA.md, FIREBASE.md), analisi e proposte (ROADMAP.md), screenshot
 start.bat        avvio su Windows
 deploy_firebase.bat  pubblica il sito su Firebase
 ```

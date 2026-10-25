@@ -95,7 +95,8 @@ segna il lavoro `done` o `error`. Dal sito si può chiedere l'annullamento (`can
 Se il PC è spento il lavoro resta in coda e parte alla prossima accensione dell'app. Se l'app è già occupata
 con una ricerca avviata in locale, il lavoro aspetta che finisca.
 
-Tipi di lavoro: `scan` (ricerca sui canali, compresi i repo GitHub), `videos` (video specifici),
+Tipi di lavoro: `scan` (ricerca sui canali, compresi repo GitHub e modelli Hugging Face), `videos` (video specifici),
+`lookup` (ricerca online dalla barra: solo il proprietario può crearlo, la esegue il PC con Claude),
 `github` (repo di tendenza e dati GitHub), `leaderboards` (aggiorna le classifiche),
 `add_channel`, `update_channel`, `delete_channel`.
 

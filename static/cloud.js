@@ -256,7 +256,7 @@ export async function create(config) {
   }
 
   function scanStatus(since) {
-    const job = latestJob(["scan", "videos"]);
+    const job = latestJob(["scan", "videos", "lookup"]);
     const base = { running: false, phase: "idle", current: null, done: 0, total: 0, added: 0, updated: 0, errors: 0,
       started_at: null, finished_at: null, log: [], log_size: 0 };
     if (!job) return base;
@@ -273,6 +273,7 @@ export async function create(config) {
         : p.current,
       started_at: job.started_at || job.created_at, finished_at: job.finished_at,
       log: lines.slice(Math.max(0, since - logBase)), log_size: logBase + lines.length,
+      lookup_result: job.type === "lookup" ? job.result || null : null,
     };
   }
 
@@ -542,6 +543,12 @@ export async function create(config) {
     }
     if (p === "/api/channels" && method === "GET") return buildChannels();
     if (p === "/api/channels" && method === "POST") return enqueue("add_channel", { value: body.value });
+    if ((m = p.match(/^\/api\/channels\/(\d+)\/latest$/))) {
+      // il browser non può leggere YouTube: si mostrano i video già scoperti dall'app sul PC
+      const ch = buildChannels().find((c) => c.id === Number(m[1]));
+      return buildVideos().filter((v) => v.channel_handle === ch?.handle).slice(0, 20)
+        .map((v) => ({ ...v, thumbnail: v.thumbnail || `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg` }));
+    }
     if ((m = p.match(/^\/api\/channels\/(\d+)$/))) {
       const ch = buildChannels().find((c) => c.id === Number(m[1]));
       if (!ch) throw new Error("Canale non trovato");
@@ -554,9 +561,11 @@ export async function create(config) {
       return enqueue("scan", { channel_handles: handles, limit: body?.limit || null, force: !!body?.force });
     }
     if (p === "/api/scan/videos") return enqueue("videos", { urls: body.urls });
+    // ricerca online dalla barra: solo il proprietario (enqueue lo verifica) e la esegue il PC con Claude
+    if (p === "/api/lookup") return enqueue("lookup", { query: String(body.query || "").slice(0, 200), kind: body.kind === "repo" ? "repo" : "model" });
     if (p === "/api/scan/cancel") {
       requireOwner();
-      const job = latestJob(["scan", "videos"]);
+      const job = latestJob(["scan", "videos", "lookup"]);
       if (job && (job.status === "running" || job.status === "queued")) {
         await fs.updateDoc(fs.doc(db, "jobs", job.id), { cancel_requested: true });
       }

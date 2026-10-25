@@ -114,6 +114,30 @@ del nome o di un alias di un modello del catalogo. Ai modelli senza corrisponden
 - **Collegamento ai modelli**: `db.list_repos()` associa a ogni repo i modelli che lo hanno tra i propri `links`
   (`db.parse_repo` normalizza gli URL in `owner/repo`), e `list_models()` restituisce il collegamento inverso in `repos`.
 
+## Ricerca online (`Scanner._run_lookup`)
+
+`POST /api/lookup {query, kind}` (o il lavoro `lookup` dal sito) avvia lo scanner in modalità ricerca:
+
+- se `query` è un repository (`owner/repo` o link GitHub) si leggono i dati da GitHub e Claude scrive solo testi e
+  categoria (`github._classify`, senza web);
+- altrimenti `analyzer.build_lookup_prompt` + `LOOKUP_SCHEMA` (`found`, `message`, `models`, `repos`) con WebSearch e
+  WebFetch sempre attivi. I modelli vengono salvati con `origin = "lookup"` e `origin_detail = query`, i repo con
+  `from_lookup = 1`.
+
+Il risultato (`lookup_result`: id dei modelli e repo, messaggio) resta nello stato dello scanner. Sul sito finisce in
+`jobs/{id}.result`, così l'interfaccia apre la scheda trovata.
+
+## Hugging Face (`app/hf.py`)
+
+- `hf.models(**params)` chiama `https://huggingface.co/api/models` chiedendo solo i campi utili (`expand[]=…`).
+- Classifiche: `leaderboards.fetch_hf` crea una classifica `hf:<pipeline_tag>` per ogni voce di `taxonomy.HF_TASKS`
+  (attività → etichetta, categoria) con i 50 modelli a `trendingScore` più alto.
+- Scoperta: `hf.discover()` raccoglie i candidati (i 100 più di tendenza in assoluto più `hf_per_task` per attività),
+  filtra per età (`hf_days`), like (`hf_min_likes`) e derivati (tag `base_model:quantized|adapter|merge`, GGUF, MLX…),
+  esclude quelli già in catalogo (link Hugging Face o nome normalizzato) e quelli già scartati (`app_state.hf_ignored`),
+  e li manda a Claude a blocchi di 25 con `HF_SCHEMA`. I modelli rilevanti hanno `origin = "hf_trending"`.
+  Viene eseguito durante la ricerca, al massimo ogni 12 ore (`hf_trending_at`).
+
 ## Formato di esportazione
 
 `db.export_catalog()` e `db.import_catalog()` definiscono il formato portabile usato da *Esporta*/*Importa*
@@ -182,7 +206,10 @@ SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la co
 | `repos` | repository GitHub: chiave `full_name` (`owner/repo` minuscolo), testi di Claude, dati GitHub, `stars_history`, fonti (`from_video`, `from_trending`), preferito e note |
 | `repo_sources` | relazione repository ↔ video con `timestamp_sec` |
 | `deleted_repos` | repository eliminati |
-| `app_state` | stato interno in JSON: `github_trending_at`, `github_ignored` |
+| `app_state` | stato interno in JSON: `github_trending_at`, `github_ignored`, `hf_trending_at`, `hf_ignored` |
+
+Le colonne aggiunte dopo la prima versione (`models.origin`, `models.origin_detail`, `repos.from_lookup`) vengono create
+da `db._migrate()` all'avvio.
 
 Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti `processing` tornano `new`.
 
@@ -215,6 +242,8 @@ Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti
 | POST | `/api/cloud/sync` | sincronizza subito con Firestore |
 | GET / POST | `/api/channels` | elenco / aggiunta (`{"value": "@canale"}` o URL) |
 | PATCH / DELETE | `/api/channels/{id}` | attiva/disattiva, rinomina / rimuove |
+| GET | `/api/channels/{id}/latest?limit=20` | ultimi caricamenti del canale (yt-dlp, date dal feed RSS di YouTube) con lo stato di analisi |
+| POST | `/api/lookup` | ricerca online di un modello o repository: `{"query": "…", "kind": "model" \| "repo"}` |
 | GET | `/api/videos` | video scoperti con stato |
 | POST | `/api/scan` | avvia una ricerca: `{"channel_ids"?: [..], "limit"?: n, "force"?: bool}` |
 | POST | `/api/scan/videos` | analizza video specifici: `{"urls": ["https://youtu.be/…"]}` |

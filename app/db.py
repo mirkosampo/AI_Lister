@@ -222,9 +222,26 @@ def conn() -> sqlite3.Connection:
     return _conn
 
 
+# colonne aggiunte dopo la prima versione: (tabella, colonna, definizione)
+MIGRATIONS = [
+    ("models", "origin", "TEXT"),          # video | lookup | hf_trending | import
+    ("models", "origin_detail", "TEXT"),   # testo cercato o id Hugging Face
+    ("repos", "from_lookup", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _migrate():
+    c = conn()
+    for table, column, definition in MIGRATIONS:
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init():
     with _lock:
         conn().executescript(SCHEMA)
+        _migrate()
         if not conn().execute("SELECT 1 FROM channels").fetchone():
             add_channel("@theAIsearch")
         # analisi interrotte da un riavvio del server
@@ -409,7 +426,8 @@ def _merge_list(old: list, new: list) -> list:
     return out
 
 
-def upsert_model(data: dict, video_id: str | None, timestamp_sec: int | None = None) -> tuple[int, bool]:
+def upsert_model(data: dict, video_id: str | None, timestamp_sec: int | None = None,
+                 origin: str = "video", origin_detail: str | None = None) -> tuple[int, bool]:
     """Inserisce o aggiorna un modello. Ritorna (id, creato)."""
     name = (data.get("name") or "").strip()
     if not name:
@@ -420,6 +438,7 @@ def upsert_model(data: dict, video_id: str | None, timestamp_sec: int | None = N
         if row is None:
             values = {
                 "slug": slugify(name), "name": name, "first_seen": now(), "updated_at": now(),
+                "origin": origin, "origin_detail": origin_detail,
                 **{f: data.get(f) for f in SCALAR_FIELDS},
                 **{f: json.dumps(data.get(f) or [], ensure_ascii=False) for f in JSON_FIELDS if f != "links"},
                 "links": json.dumps(_merge_links([], data.get("links") or []), ensure_ascii=False),
@@ -563,10 +582,10 @@ def upsert_repo(data: dict, source: str, video_id: str | None = None, timestamp_
         return None, False
     with _lock:
         c = conn()
-        if source == "trending" and c.execute("SELECT 1 FROM deleted_repos WHERE full_name = ?", (full,)).fetchone():
+        if source in ("trending", "hf") and c.execute("SELECT 1 FROM deleted_repos WHERE full_name = ?", (full,)).fetchone():
             return None, False
         row = c.execute("SELECT * FROM repos WHERE full_name = ?", (full,)).fetchone()
-        flag = "from_video" if source == "video" else "from_trending"
+        flag = {"video": "from_video", "lookup": "from_lookup"}.get(source, "from_trending")
         if row is None:
             values = {
                 "full_name": full, "name": data.get("name") or full, "url": f"https://github.com/{data.get('name') or full}",
@@ -707,7 +726,8 @@ def repos_for_models() -> dict[int, list]:
 
 CATALOG_FORMAT = "ai-lister-catalog"
 CATALOG_VERSION = 1
-MODEL_EXPORT_FIELDS = ("slug", "name", "starred", "notes", "first_seen", "updated_at") + SCALAR_FIELDS + JSON_FIELDS
+MODEL_EXPORT_FIELDS = ("slug", "name", "starred", "notes", "first_seen", "updated_at", "origin", "origin_detail") \
+    + SCALAR_FIELDS + JSON_FIELDS
 VIDEO_EXPORT_FIELDS = ("id", "title", "url", "published_at", "duration", "thumbnail", "status", "summary",
                        "models_found", "discovered_at", "processed_at")
 
@@ -749,7 +769,7 @@ def export_catalog(origin: str = "local", include_rankings: bool = False) -> dic
 
 REPO_EXPORT_FIELDS = ("full_name", "name", "url", "description", "summary", "details", "category", "kind", "tags",
                       "topics", "language", "license", "stars", "forks", "open_issues", "homepage", "created_at_gh",
-                      "pushed_at", "archived", "stars_history", "from_video", "from_trending", "trending_topic",
+                      "pushed_at", "archived", "stars_history", "from_video", "from_trending", "from_lookup", "trending_topic",
                       "starred", "notes", "first_seen", "updated_at", "gh_fetched_at")
 
 
@@ -797,7 +817,7 @@ def _import_repos(c, data: dict, stats: dict):
             values["url"] = values["url"] or f"https://github.com/{full}"
             for f in REPO_JSON_FIELDS:
                 values[f] = json.dumps(values.get(f) or [], ensure_ascii=False)
-            for f in ("archived", "from_video", "from_trending", "starred"):
+            for f in ("archived", "from_video", "from_trending", "from_lookup", "starred"):
                 values[f] = 1 if values.get(f) else 0
             values["first_seen"] = values["first_seen"] or now()
             values["updated_at"] = values["updated_at"] or now()
@@ -822,7 +842,7 @@ def _import_repos(c, data: dict, stats: dict):
                         updates[f] = (1 if r[f] else 0) if f == "archived" else r[f]
                 if r.get("topics"):
                     updates["topics"] = json.dumps(r["topics"], ensure_ascii=False)
-            for f in ("from_video", "from_trending"):
+            for f in ("from_video", "from_trending", "from_lookup"):
                 if r.get(f) and not row[f]:
                     updates[f] = 1
             tags = _merge_list(json.loads(row["tags"] or "[]"), r.get("tags") or [])
@@ -916,6 +936,7 @@ def import_catalog(data: dict) -> dict:
                 values = {
                     "slug": slug, "name": name, "starred": 1 if m.get("starred") else 0, "notes": m.get("notes"),
                     "first_seen": m.get("first_seen") or now(), "updated_at": m.get("updated_at") or now(),
+                    "origin": m.get("origin") or "import", "origin_detail": m.get("origin_detail"),
                     **{f: m.get(f) for f in SCALAR_FIELDS},
                     **{f: json.dumps(m.get(f) or [], ensure_ascii=False) for f in JSON_FIELDS},
                 }

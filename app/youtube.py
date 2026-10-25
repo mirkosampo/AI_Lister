@@ -42,6 +42,41 @@ def list_channel_videos(channel_url: str, limit: int) -> tuple[str | None, list[
     return name, videos
 
 
+def latest_videos(channel_url: str, limit: int = 20) -> list[dict]:
+    """Ultimi video caricati (esclusi gli Short), dal più recente, con data di pubblicazione.
+    L'elenco viene da yt-dlp; le date dal feed RSS pubblico del canale (ultimi 15 caricamenti)."""
+    import re
+    import urllib.request
+
+    opts = {**_YDL_BASE, "extract_flat": "in_playlist", "playlistend": limit}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(channel_url.rstrip("/") + "/videos", download=False)
+    dates = {}
+    if info.get("channel_id"):
+        try:
+            req = urllib.request.Request(f"https://www.youtube.com/feeds/videos.xml?channel_id={info['channel_id']}",
+                                         headers={"User-Agent": "AI-Lister"})
+            xml = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+            for entry in re.findall(r"<entry>(.*?)</entry>", xml, re.S):
+                vid = re.search(r"<yt:videoId>([^<]+)</yt:videoId>", entry)
+                pub = re.search(r"<published>([^<]+)</published>", entry)
+                if vid and pub:
+                    dates[vid.group(1)] = pub.group(1)
+        except Exception:  # noqa: BLE001  (le date sono un di più)
+            pass
+    out = []
+    for e in (info.get("entries") or [])[:limit]:
+        if not e or not e.get("id"):
+            continue
+        out.append({
+            "id": e["id"], "title": e.get("title"), "url": video_url(e["id"]),
+            "duration": int(e["duration"]) if e.get("duration") else None,
+            "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg",
+            "published_at": dates.get(e["id"]), "views": e.get("view_count"),
+        })
+    return out
+
+
 def get_video_details(video_id: str) -> dict:
     with yt_dlp.YoutubeDL(_YDL_BASE) as ydl:
         info = ydl.extract_info(video_url(video_id), download=False)

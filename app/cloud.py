@@ -27,7 +27,7 @@ CHUNKS = 16                      # il catalogo è diviso in 16 documenti (limite
 HEARTBEAT_SEC = 60
 PERIODIC_SYNC_SEC = 600
 JOB_POLL_SEC = 60                # ripiego se l'ascolto in tempo reale si interrompe
-APP_VERSION = 1
+APP_VERSION = 2                  # aumentare quando cambiano categorie/metadati pubblicati sul sito
 
 
 REPO_CHUNKS = 8                  # repository GitHub: documenti repos-00 … repos-07
@@ -289,7 +289,13 @@ class CloudAgent:
             "github_trending_at": db.get_state("github_trending_at"),
             "stats": db.stats(), "synced_at": db.now(), "version": APP_VERSION,
         }
-        self.client.collection("meta").document("app").set(content)
+        ref = self.client.collection("meta").document("app")
+        remote = (ref.get().to_dict() or {}).get("version") or 0
+        if remote > APP_VERSION:
+            # un'altra copia dell'app, più recente, ha già pubblicato metadati più aggiornati: non li si sovrascrive
+            self.state["last_error"] = "Sul sito c'è una versione più recente dell'app: aggiorna questa copia."
+            return
+        ref.set(content)
 
     def _push_leaderboards(self):
         fetched = db.leaderboards_fetched_at()
@@ -366,8 +372,13 @@ class CloudAgent:
         self.state["current_job"] = ref.id
         self._heartbeat()
         try:
-            if kind in ("scan", "videos"):
-                if kind == "scan":
+            if kind in ("scan", "videos", "lookup"):
+                if kind == "lookup":
+                    q = str(params.get("query") or "").strip()[:200]
+                    if len(q) < 2:
+                        raise ValueError("testo da cercare troppo corto")
+                    started = scanner.start(lookup={"query": q, "kind": "repo" if params.get("kind") == "repo" else "model"})
+                elif kind == "scan":
                     handles = params.get("channel_handles") or []
                     ids = [c["id"] for c in db.list_channels() if c["handle"] in handles] or None
                     started = scanner.start(channel_ids=ids, limit=params.get("limit"), force=bool(params.get("force")))
@@ -422,7 +433,7 @@ class CloudAgent:
             st = scanner.status()
             lines = st["log"]
             payload = {
-                "progress": {k: st[k] for k in ("phase", "current", "done", "total", "added", "updated", "errors")},
+                "progress": {k: st.get(k) for k in ("phase", "current", "done", "total", "added", "updated", "repos_added", "errors")},
                 "log": lines[-400:], "log_base": max(0, len(lines) - 400),
             }
             digest = _digest(payload)
@@ -438,6 +449,8 @@ class CloudAgent:
         st = scanner.status()
         self._finish(ref, "error" if st["errors"] and not st["added"] and not st["updated"] else "done",
                      log=st["log"])
+        if st.get("lookup_result"):
+            ref.update({"result": st["lookup_result"]})
 
     def _mirror_refresher(self, ref, refresher_obj):
         """Come _mirror_scan, per gli aggiornamenti con un log semplice (es. GitHub)."""

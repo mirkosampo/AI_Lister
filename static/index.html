@@ -132,7 +132,7 @@
         <span class="hint" id="aaKeyHint"></span>
       </label>
       <fieldset class="cloud-settings">
-        <legend>Repository GitHub</legend>
+        <legend>Scoperta: GitHub e Hugging Face</legend>
         <label class="check"><input type="checkbox" name="github_trending">
           Includi nelle ricerche i repo di IA in tendenza su GitHub (al massimo ogni 12 ore)
         </label>
@@ -142,6 +142,13 @@
         <div class="edit-row">
           <label>Creati negli ultimi (giorni)<input name="github_days" type="number" min="1" max="90"></label>
           <label>Stelle minime<input name="github_min_stars" type="number" min="0"></label>
+        </div>
+        <label class="check"><input type="checkbox" name="hf_trending">
+          Includi nelle ricerche i modelli di tendenza su Hugging Face (tutte le attività, al massimo ogni 12 ore)
+        </label>
+        <div class="edit-row">
+          <label>Modelli HF creati negli ultimi (giorni)<input name="hf_days" type="number" min="1" max="365"></label>
+          <label>Like minimi su HF<input name="hf_min_likes" type="number" min="0"></label>
         </div>
         <label>Token GitHub <small>(facoltativo: alza il limite da 60 a 5000 richieste/ora)</small>
           <input name="github_token" type="password" autocomplete="off" placeholder="Incolla il token">

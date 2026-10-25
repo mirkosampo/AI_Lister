@@ -196,6 +196,25 @@ def delete_channel(channel_id: int):
     return {"ok": True}
 
 
+@app.get("/api/channels/{channel_id}/latest")
+def channel_latest(channel_id: int, limit: int = 20):
+    """Ultimi video caricati sul canale (da YouTube), con lo stato di analisi nel catalogo."""
+    ch = next((c for c in db.list_channels() if c["id"] == channel_id), None)
+    if not ch:
+        raise HTTPException(404, "Canale non trovato")
+    try:
+        videos = youtube.latest_videos(ch["url"], max(1, min(limit, 50)))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"YouTube non raggiungibile: {exc}") from exc
+    for v in videos:
+        row = db.get_video(v["id"])
+        v["status"] = row["status"] if row else None
+        v["models_found"] = row["models_found"] if row else None
+        if row and row["published_at"] and not v["published_at"]:
+            v["published_at"] = row["published_at"]
+    return videos
+
+
 @app.get("/api/videos")
 def videos():
     return db.list_videos()
@@ -222,6 +241,24 @@ def scan_videos(req: VideoRequest):
     if not scanner.start(video_ids=ids):
         raise HTTPException(409, "Una ricerca è già in corso")
     return {"ok": True, "video_ids": ids}
+
+
+class LookupRequest(BaseModel):
+    query: str
+    kind: str = "model"   # model | repo
+
+
+@app.post("/api/lookup")
+def lookup(req: LookupRequest):
+    """Cerca online (con Claude e ricerca web) un modello o repository non in catalogo e lo aggiunge."""
+    query = req.query.strip()
+    if len(query) < 2:
+        raise HTTPException(400, "Scrivi almeno due caratteri")
+    if github.refresher.state["running"]:
+        raise HTTPException(409, "È in corso un aggiornamento da GitHub: riprova tra poco")
+    if not scanner.start(lookup={"query": query[:200], "kind": "repo" if req.kind == "repo" else "model"}):
+        raise HTTPException(409, "Una ricerca è già in corso")
+    return {"ok": True}
 
 
 @app.post("/api/scan/cancel")

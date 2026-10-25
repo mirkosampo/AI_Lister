@@ -118,11 +118,16 @@ def _classify(candidates: list[dict], settings: dict, log, register_proc) -> lis
     lines = "\n".join(
         f"- {c['url']} | ★{c['stars']} | {c.get('language') or '?'} | topics: {', '.join(c['topics'][:8])} | "
         f"{(c.get('description') or '').replace(chr(10), ' ')[:300]}" for c in candidates)
-    prompt = f"""You are curating a catalog of AI repositories. Below are new GitHub repositories that are gaining
-stars quickly. For EACH one return an item (same `url`):
-- `relevant`: true only if the repository is genuinely about AI/ML (models, agents, AI tools/apps, ML frameworks,
-  datasets, MCP servers...). false for generic software that merely mentions AI, spam, coupon/marketing bots,
-  personal configs, link farms, or anything you cannot judge.
+    prompt = f"""You are curating a catalog of interesting repositories for someone who follows AI, web development
+and design. Below are new GitHub repositories that are gaining stars quickly. For EACH one return an item (same `url`):
+- `relevant`: true if the repository is notable and in scope:
+  * AI/ML: models, agents, AI tools and apps, ML frameworks, datasets, MCP servers;
+  * AI addons/plugins/extensions for other software (Blender, Figma, Photoshop, VS Code, browsers, ComfyUI...);
+  * web development (frameworks, libraries, starters, tooling) and web/UI design (design systems, UI kits, CSS, animation);
+  * graphic design and creative tools (vector, illustration, fonts, image/video tools for creators);
+  * developer tools and productivity tools.
+  false for spam, coupon/marketing bots, personal dotfiles/configs, homework, mirrors/forks without changes,
+  link farms, region-specific scrapers of little general interest, or anything you cannot judge.
 - `category` (catalog category): {", ".join(f"{k} = {v}" for k, v in taxonomy.CATEGORY_HINTS.items())}
 - `kind`: {", ".join(f"{k} = {v}" for k, v in taxonomy.REPO_KIND_HINTS.items())}
 - `summary` (one sentence) and `details` (2-3 sentences) written in {settings['language']}; short lowercase English `tags`.
