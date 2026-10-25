@@ -49,7 +49,7 @@ service cloud.firestore {
         && request.resource.data.status == 'queued'
         && request.resource.data.keys().hasOnly(['type', 'params', 'status', 'created_at'])
         && request.resource.data.type in
-             ['scan', 'videos', 'lookup', 'leaderboards', 'github', 'add_channel', 'update_channel', 'delete_channel'];
+             ['scan', 'videos', 'lookup', 'digest', 'leaderboards', 'github', 'add_channel', 'update_channel', 'delete_channel'];
       // dal sito si può solo chiedere l'annullamento
       allow update: if isOwner()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cancel_requested']);

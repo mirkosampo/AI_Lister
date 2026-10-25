@@ -106,6 +106,7 @@ export async function create(config) {
     });
   });
   listen(fs.doc(db, "meta", "app"), (s) => { data.meta = s.exists() ? s.data() : null; });
+  listen(fs.doc(db, "meta", "digest"), (s) => { data.digest = s.exists() ? s.data() : null; });
   listen(fs.doc(db, "leaderboards", "_index"), (s) => { data.lbIndex = s.exists() ? s.data() : null; });
   listen(fs.doc(db, "agent", "status"), (s) => { data.agent = s.exists() ? s.data() : null; renderAgent(); });
   listen(fs.query(fs.collection(db, "jobs"), fs.orderBy("created_at", "desc"), fs.limit(10)), (snap) => {
@@ -256,7 +257,7 @@ export async function create(config) {
   }
 
   function scanStatus(since) {
-    const job = latestJob(["scan", "videos", "lookup"]);
+    const job = latestJob(["scan", "videos", "lookup", "digest"]);
     const base = { running: false, phase: "idle", current: null, done: 0, total: 0, added: 0, updated: 0, errors: 0,
       started_at: null, finished_at: null, log: [], log_size: 0 };
     if (!job) return base;
@@ -561,6 +562,9 @@ export async function create(config) {
       return enqueue("scan", { channel_handles: handles, limit: body?.limit || null, force: !!body?.force });
     }
     if (p === "/api/scan/videos") return enqueue("videos", { urls: body.urls });
+    if (p === "/api/digest" && method === "GET") return data.digest || {};
+    if (p === "/api/digest") return enqueue("digest", { days: Number(body?.days) || 7 });
+    if (p === "/api/sources/suggested") return [];
     // ricerca online dalla barra: solo il proprietario (enqueue lo verifica) e la esegue il PC con Claude
     if (p === "/api/lookup") return enqueue("lookup", { query: String(body.query || "").slice(0, 200), kind: body.kind === "repo" ? "repo" : "model" });
     if (p === "/api/scan/cancel") {

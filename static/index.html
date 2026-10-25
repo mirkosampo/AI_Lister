@@ -41,6 +41,7 @@
   <div class="layout">
     <aside class="sidebar" id="sidebar">
       <nav class="views" id="views">
+        <button data-view="news">Novità <span class="count" id="cntNews">0</span></button>
         <button data-view="models" class="active">Modelli <span class="count" id="cntModels">0</span></button>
         <button data-view="repos">Repository <span class="count" id="cntRepos">0</span></button>
         <button data-view="leaderboards">Classifiche <span class="count" id="cntBoards">0</span></button>
@@ -143,6 +144,15 @@
           <label>Creati negli ultimi (giorni)<input name="github_days" type="number" min="1" max="90"></label>
           <label>Stelle minime<input name="github_min_stars" type="number" min="0"></label>
         </div>
+        <label class="check"><input type="checkbox" name="src_papers">
+          Paper di tendenza su Hugging Face (con almeno <input name="papers_min_upvotes" type="number" min="1" class="inline-num"> voti)
+        </label>
+        <label class="check"><input type="checkbox" name="src_openrouter">
+          Nuovi modelli via API su OpenRouter (arrivati negli ultimi <input name="openrouter_days" type="number" min="1" class="inline-num"> giorni)
+        </label>
+        <label class="check"><input type="checkbox" name="src_hackernews">
+          Repo e modelli dai post di Hacker News (con almeno <input name="hn_min_points" type="number" min="1" class="inline-num"> punti)
+        </label>
         <label class="check"><input type="checkbox" name="hf_trending">
           Includi nelle ricerche i modelli di tendenza su Hugging Face (tutte le attività, al massimo ogni 12 ore)
         </label>

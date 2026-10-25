@@ -3,9 +3,9 @@ import subprocess
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from . import analyzer, db, github, hf, youtube
+from . import analyzer, db, github, hf, sources, youtube
 from .config import load_settings
 
 
@@ -35,7 +35,7 @@ class Scanner:
         return {**self.state, "log": self.log_lines[since:], "log_size": len(self.log_lines)}
 
     def start(self, *, channel_ids: list[int] | None = None, limit: int | None = None,
-              lookup: dict | None = None,
+              lookup: dict | None = None, digest: dict | None = None,
               video_ids: list[str] | None = None, force: bool = False) -> bool:
         with self._lock:
             if self.state["running"]:
@@ -43,12 +43,16 @@ class Scanner:
             self._cancel.clear()
             self._aborted = False
             self.log_lines = []
-            self.state = {**self._idle_state(), "running": True, "phase": "lookup" if lookup else "discovery",
+            phase = "lookup" if lookup else "digest" if digest else "discovery"
+            self.state = {**self._idle_state(), "running": True, "phase": phase,
                           "lookup": lookup, "started_at": datetime.now().isoformat(timespec="seconds")}
-            self._thread = threading.Thread(
-                target=self._run_lookup if lookup else self._run,
-                args=(lookup,) if lookup else (channel_ids, limit, video_ids, force), daemon=True,
-            )
+            if lookup:
+                target, args = self._run_lookup, (lookup,)
+            elif digest:
+                target, args = self._run_digest, (digest,)
+            else:
+                target, args = self._run, (channel_ids, limit, video_ids, force)
+            self._thread = threading.Thread(target=target, args=args, daemon=True)
             self._thread.start()
             return True
 
@@ -97,6 +101,13 @@ class Scanner:
                 stats = hf.discover(self._log, self._set_proc, cancel=self._cancel)
                 self.state["added"] += stats.get("added", 0)
                 self.state["updated"] += stats.get("updated", 0)
+                db.checkpoint()
+            # altre fonti: paper di tendenza HF, OpenRouter, Hacker News (al massimo ogni 12 ore)
+            if not self._cancel.is_set() and not video_ids and sources.due(settings):
+                self.state.update(phase="sources", current="Altre fonti")
+                stats = sources.discover(self._log, self._set_proc, cancel=self._cancel)
+                self.state["added"] += stats.get("models", 0)
+                self.state["repos_added"] += stats.get("repos", 0)
                 db.checkpoint()
         except Exception as exc:  # noqa: BLE001
             self._log(f"Errore inatteso: {exc}", "error")
@@ -283,6 +294,49 @@ class Scanner:
                       "success")
             s.update(running=False, phase="idle", current=None, lookup_result=result,
                      finished_at=datetime.now().isoformat(timespec="seconds"))
+            for callback in self.on_finish:
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    # ---------- riepilogo delle novità ----------
+
+    def _run_digest(self, digest: dict):
+        """Riepilogo delle novità degli ultimi N giorni, scritto da Claude (senza web) e salvato in app_state."""
+        settings = load_settings()
+        days = int(digest.get("days") or 7)
+        self.state.update(total=1, current=f"ultimi {days} giorni")
+        self._log(f"📰 Riepilogo delle novità degli ultimi {days} giorni", "title")
+        try:
+            since = datetime.now().astimezone() - timedelta(days=days)
+            models = [m for m in db.list_models() if db.parse_ts(m.get("first_seen")) >= since]
+            repos = [r for r in db.list_repos() if db.parse_ts(r.get("first_seen")) >= since]
+            if not models and not repos:
+                self._log("  Nessuna novità nel periodo.", "warn")
+                db.set_state("digest", {"created_at": db.now(), "days": days, "title": "Nessuna novità",
+                                        "intro": f"Negli ultimi {days} giorni non è stato aggiunto nulla al catalogo.",
+                                        "highlights": [], "sections": [], "counts": {"models": 0, "repos": 0}})
+                return
+            self._log(f"  {len(models)} modelli e {len(repos)} repository da riassumere")
+            data = self._analyze_with_retry(analyzer.build_digest_prompt(models, repos, days, settings), settings,
+                                            schema=analyzer.DIGEST_SCHEMA, web=False, effort="low")
+            ids = {m["name"].lower(): ("model", m["id"]) for m in models}
+            ids.update({r["name"].lower(): ("repo", r["id"]) for r in repos})
+            for h in data.get("highlights") or []:
+                kind, item_id = ids.get((h.get("name") or "").lower(), (h.get("kind"), None))
+                h.update(kind=kind, id=item_id)
+            db.set_state("digest", {**data, "created_at": db.now(), "days": days,
+                                    "counts": {"models": len(models), "repos": len(repos)}})
+            self.state["done"] = 1
+            self._log(f"  ✔ {data.get('title')}", "success")
+        except Exception as exc:  # noqa: BLE001
+            if not self._cancel.is_set():
+                self.state["errors"] += 1
+                self._log(f"  ❌ {exc}", "error")
+        finally:
+            self.state.update(running=False, phase="idle", current=None,
+                              finished_at=datetime.now().isoformat(timespec="seconds"))
             for callback in self.on_finish:
                 try:
                     callback()

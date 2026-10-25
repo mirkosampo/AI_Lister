@@ -97,6 +97,7 @@ con una ricerca avviata in locale, il lavoro aspetta che finisca.
 
 Tipi di lavoro: `scan` (ricerca sui canali, compresi repo GitHub e modelli Hugging Face), `videos` (video specifici),
 `lookup` (ricerca online dalla barra: solo il proprietario può crearlo, la esegue il PC con Claude),
+`digest` (riepilogo delle novità, pubblicato in `meta/digest`),
 `github` (repo di tendenza e dati GitHub), `leaderboards` (aggiorna le classifiche),
 `add_channel`, `update_channel`, `delete_channel`.
 

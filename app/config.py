@@ -37,6 +37,13 @@ DEFAULTS = {
                       "comfyui, computer-vision, ai-tools, developer-tools, nextjs, react, tailwindcss, web-design, "
                       "design-system, ui-components, figma-plugin, blender-addon, graphic-design, vscode-extension, "
                       "chrome-extension"),
+    # Altre fonti (al massimo ogni 12 ore): paper di tendenza HF, nuovi modelli su OpenRouter, Hacker News
+    "src_papers": True,
+    "papers_min_upvotes": 30,
+    "src_openrouter": True,
+    "openrouter_days": 30,
+    "src_hackernews": True,
+    "hn_min_points": 150,
     # Modelli di tendenza su Hugging Face: inclusi nelle ricerche (al massimo ogni 12 ore)
     "hf_trending": True,
     "hf_days": 45,

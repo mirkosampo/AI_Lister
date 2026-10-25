@@ -15,6 +15,11 @@ Claude estrae ogni modello presentato, lo classifica e, se vuoi, verifica i dati
 
 ## Funzionalità
 
+- **Novità**: tutto ciò che è entrato nel catalogo negli ultimi 7, 30 o 90 giorni, giorno per giorno e filtrabile per
+  tipo e fonte, con un **riepilogo** scritto da Claude sulle uscite più importanti. Vedi [Novità](#novità).
+- **Molte fonti**: canali YouTube (con 15 canali consigliati), modelli e paper di tendenza su Hugging Face, nuovi modelli
+  su OpenRouter, repository di tendenza su GitHub e post di Hacker News. Vedi [Fonti](#fonti).
+
 - **Catalogo ricercabile**: ricerca istantanea su nome, sviluppatore, descrizione e tag (tasto `/`), vista a schede o tabella, vari ordinamenti.
 - **Ricerca online dalla barra**: se un modello o un repository non è in catalogo, un clic (o Invio) e Claude lo cerca
   sul web, verifica i dati e lo aggiunge. Vedi [Ricerca online](#ricerca-online-dalla-barra).
@@ -66,6 +71,25 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt      # macOS/Linux: .venv/bin/pip
 .venv/Scripts/python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
 ```
+
+### Claude: solo con l'abbonamento, mai a consumo
+
+AI Lister usa Claude **esclusivamente tramite l'abbonamento** (Pro/Max) collegato alla Claude CLI: ogni analisi
+consuma i limiti d'uso inclusi nel piano e **non genera addebiti a consumo**. Per garantirlo:
+
+- le variabili d'ambiente che farebbero passare la CLI alla fatturazione API (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  Bedrock, Vertex, Foundry) vengono **rimosse** prima di avviarla;
+- prima di ogni uso l'app verifica con `claude auth status` che il login sia quello dell'abbonamento (`claude.ai`, con
+  tipo di piano), oppure il token di `claude setup-token` che richiede un abbonamento. In caso contrario non usa Claude;
+- quando si raggiunge il limite d'uso la ricerca si ferma e i video restano in coda per la volta successiva.
+
+I dollari che compaiono nel log ("valore equivalente") indicano solo quanto costerebbe la stessa richiesta via API:
+con l'abbonamento non vengono addebitati. **Consiglio:** nelle impostazioni del tuo account su claude.ai lascia
+disattivato l'eventuale utilizzo extra a pagamento oltre i limiti del piano. Così, al raggiungimento del limite,
+Claude si ferma invece di proseguire a consumo.
+
+Le altre fonti di dati (YouTube, GitHub, Hugging Face, OpenRouter, Hacker News, Arena, Epoch AI) e Firebase (piano
+gratuito Spark) non hanno costi.
 
 ### Configurare Claude Code CLI
 
@@ -143,6 +167,33 @@ Dettagli tecnici, schema del database e API: [docs/ARCHITETTURA.md](docs/ARCHITE
 Categorie: Linguaggio (LLM), Codice, Agenti & Computer use, Multimodale / Visione, Generazione immagini, Editing immagini,
 Generazione video, Musica & Audio, Voce (TTS / STT), 3D & Scene, World model, Avatar & Animazione, Robotica,
 Upscaling & Restauro, Embedding & Retrieval, Scienza & Ricerca, Altro. Si modificano in [`app/taxonomy.py`](app/taxonomy.py).
+
+## Novità
+
+La scheda **Novità** mostra in ordine cronologico, raggruppati per giorno, i modelli e i repository entrati nel catalogo.
+- **Periodo**: 7, 30 o 90 giorni. **Tipo**: tutto, solo modelli o solo repository.
+- **Filtri per fonte**: 📺 video, 🔎 ricerca online, 🤗 Hugging Face, 📄 paper HF, 🔀 OpenRouter, 🟧 Hacker News,
+  🔥 GitHub, 📥 importazione.
+- **Riepilogo**: il pulsante *Scrivi il riepilogo* fa scrivere a Claude, senza ricerca web, una sintesi del periodo con
+  titolo, quadro generale, le 5-10 uscite più importanti (cliccabili) e un paragrafo per area. Resta salvato ed è visibile
+  anche sul sito; lo aggiorni quando vuoi.
+
+## Fonti
+
+Il pulsante **Cerca nuovi modelli** passa in rassegna tutte le fonti attive. Le fonti diverse dai video vengono
+consultate al massimo ogni 12 ore, e ogni elemento viene valutato da Claude una sola volta.
+
+| Fonte | Cosa porta | Come |
+|---|---|---|
+| Canali YouTube | modelli e repo presentati nei video | analisi di descrizione, capitoli e trascrizione; nella scheda *Canali* ci sono 15 canali consigliati da aggiungere con un clic |
+| Hugging Face: modelli di tendenza | modelli open nuovi, per tutte le attività | metadati del Hub, valutazione di Claude senza web |
+| Hugging Face: paper di tendenza | modelli e codice dai paper più votati della settimana | titolo, riassunto, link al codice |
+| OpenRouter | modelli appena arrivati via API, anche quelli chiusi | nome, descrizione, contesto, prezzo |
+| GitHub: tendenze | repo nuovi di IA, sviluppo web, design, addon e tool | API di ricerca per argomento |
+| Hacker News | repo GitHub e modelli Hugging Face arrivati in prima pagina | post della settimana sopra una soglia di punti |
+
+Ogni fonte si attiva o disattiva in ⚙ Impostazioni → *Scoperta*, con le relative soglie. Reddit non è incluso:
+blocca l'accesso anonimo alla sua API.
 
 ## Ricerca online dalla barra
 
@@ -338,6 +389,7 @@ app/
   cloud.py       collegamento con Firebase: sincronizzazione, coda di lavori, stato del PC
   github.py      dati dall'API di GitHub e repository di IA in tendenza
   hf.py          Hugging Face: modelli di tendenza per attività (classifiche e scoperta)
+  sources.py     altre fonti: paper HF, OpenRouter, Hacker News, canali YouTube consigliati
   db.py          SQLite e logica di unione dei modelli
   taxonomy.py    categorie, licenze, tipi di link
   config.py      percorsi e impostazioni

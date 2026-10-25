@@ -18,7 +18,8 @@ _TRANSIENT = ("another claude code process is refreshing", "exited mid-refresh",
               "econnreset", "socket hang up", "etimedout", "internal server error", "api_error")
 _AUTH = ("failed to authenticate", "oauth session expired", "not logged in", "please run /login",
          "invalid api key", "oauth token has been revoked", "authentication_error")
-_LIMIT = ("usage limit", "limit reached", "rate limit", "rate_limit", "out of extra usage", "credit balance")
+_LIMIT = ("usage limit", "limit reached", "rate limit", "rate_limit", "out of extra usage", "extra usage",
+          "credit balance", "billing", "overage")
 
 
 class AnalysisError(Exception):
@@ -65,8 +66,16 @@ def find_claude(configured: str = "") -> str | None:
     return None
 
 
+# Variabili che farebbero usare alla CLI la fatturazione a consumo (API Anthropic o cloud di terzi) invece
+# dell'abbonamento: vengono sempre rimosse, così Claude usa solo il login dell'abbonamento (limiti inclusi nel piano).
+_PAY_PER_USE_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                     "CLAUDE_CODE_USE_FOUNDRY", "AWS_BEARER_TOKEN_BEDROCK")
+
+
 def _env() -> dict:
     env = dict(os.environ)
+    for key in _PAY_PER_USE_VARS:
+        env.pop(key, None)
     # Se il server è stato avviato da dentro una sessione Claude Code (es. l'app desktop), la CLI
     # erediterebbe le variabili di quella sessione e il suo proxy di autenticazione: le rimuoviamo
     # così usa il proprio login, come quando l'app parte da start.bat.
@@ -99,8 +108,33 @@ def auth_status(claude_path: str | None) -> dict:
         data = json.loads(out.stdout or "{}")
     except Exception as exc:  # noqa: BLE001
         return {"found": True, "path": claude_path, "loggedIn": False, "error": str(exc)}
+    method = data.get("authMethod")
+    subscription = data.get("subscriptionType")
+    # abbonamento: login claude.ai (Pro/Max/…) oppure token di `claude setup-token`, che richiede un abbonamento
+    is_subscription = bool(data.get("loggedIn")) and (method == "claude.ai" or bool(subscription)
+                                                      or uses_long_lived_token())
     return {"found": True, "path": claude_path, "loggedIn": bool(data.get("loggedIn")),
-            "authMethod": data.get("authMethod"), "longLivedToken": uses_long_lived_token()}
+            "authMethod": method, "subscriptionType": subscription, "subscription": is_subscription,
+            "longLivedToken": uses_long_lived_token()}
+
+
+_auth_cache: dict = {"at": 0.0, "info": None}
+
+
+def require_subscription(claude_path: str):
+    """Blocca l'uso di Claude se la CLI non è collegata all'abbonamento (niente costi a consumo)."""
+    import time
+
+    if time.time() - _auth_cache["at"] > 300 or not _auth_cache["info"]:
+        _auth_cache.update(at=time.time(), info=auth_status(claude_path))
+    info = _auth_cache["info"]
+    if not info.get("loggedIn"):
+        raise AnalysisError("Claude CLI non autenticata: esegui `claude auth login` con il tuo account Pro.")
+    if not info.get("subscription"):
+        _auth_cache["info"] = None
+        raise AnalysisError(
+            f"usage limit: la Claude CLI non è collegata a un abbonamento (metodo «{info.get('authMethod')}»). "
+            "AI Lister usa Claude solo con l'abbonamento, mai a consumo: esegui `claude auth login` con il tuo account Pro.")
 
 
 # ---------- schema & prompt ----------
@@ -334,6 +368,7 @@ def run_analysis(
     claude = find_claude(settings.get("claude_path", ""))
     if not claude:
         raise AnalysisError("Claude CLI non trovata. Installala o imposta il percorso nelle impostazioni.")
+    require_subscription(claude)
 
     use_web = settings["web_enrich"] if web is None else web
     tools = "WebSearch,WebFetch" if use_web else ""
@@ -411,12 +446,67 @@ def run_analysis(
         f"  ⏱ {round((result_event.get('duration_ms') or 0) / 1000)} s · "
         f"{server.get('web_search_requests', 0)} ricerche web · "
         f"{server.get('web_fetch_requests', 0)} pagine lette"
-        + (f" · ${result_event['total_cost_usd']:.2f}" if result_event.get("total_cost_usd") else "")
+        + (f" · valore equivalente ${result_event['total_cost_usd']:.2f}, incluso nell'abbonamento"
+           if result_event.get("total_cost_usd") else "")
     )
     structured = result_event.get("structured_output")
     if isinstance(structured, dict):
         return structured
     return _extract_json(str(result_event.get("result") or ""))
+
+
+# ---------- riepilogo delle novità ----------
+
+DIGEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "description": "short headline of the period"},
+        "intro": {"type": "string", "description": "3-5 sentences: the big picture of the period"},
+        "highlights": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "exact name as given in the list"},
+                    "kind": {"type": "string", "enum": ["model", "repo"]},
+                    "why": {"type": "string", "description": "one sentence: why it matters"},
+                },
+                "required": ["name", "kind", "why"],
+            },
+        },
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"category": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["category", "text"],
+            },
+        },
+    },
+    "required": ["title", "intro", "highlights", "sections"],
+}
+
+
+def build_digest_prompt(models: list[dict], repos: list[dict], days: int, settings: dict) -> str:
+    def m_line(m):
+        return (f"- [model] {m['name']} | {taxonomy.CATEGORIES.get(m.get('category'), m.get('category'))} | "
+                f"{m.get('developer') or '?'} | {m.get('license_type')} | {(m.get('summary') or '')[:200]}")
+
+    def r_line(r):
+        return (f"- [repo] {r['name']} | {taxonomy.CATEGORIES.get(r.get('category'), r.get('category'))} | "
+                f"★{r.get('stars')} (+{r.get('stars_per_day') or 0}/day) | {(r.get('summary') or '')[:200]}")
+
+    lines = [m_line(m) for m in models[:150]] + [r_line(r) for r in repos[:100]]
+    return f"""Write a news digest, in {settings['language']}, of what was added to a personal AI catalog in the last
+{days} days (list below). Audience: someone who wants to stay up to date on AI models and interesting repositories.
+- `title`: a short headline; `intro`: the big picture (main releases, trends, open vs closed).
+- `highlights`: the 5-10 most important items, with `name` copied EXACTLY from the list and one sentence on why.
+- `sections`: one short paragraph per relevant area (e.g. language models, images/video, audio and voice, 3D and vision,
+  repositories and tools), mentioning concrete names. Skip areas with nothing notable.
+- Use only the information below; do not invent facts.
+
+ITEMS
+{chr(10).join(lines)}"""
 
 
 # ---------- ricerca online di un modello o repository (barra di ricerca) ----------

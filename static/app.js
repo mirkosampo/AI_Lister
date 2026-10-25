@@ -39,6 +39,12 @@ const state = {
   ghPollTimer: null,
   // canali: elenco a tendina degli ultimi video
   openChannels: new Set(),
+  suggested: [],
+  // novità
+  digest: null,
+  newsDays: 7,
+  newsType: "all",
+  newsSources: new Set(),
   channelVideos: {},
 };
 
@@ -121,6 +127,7 @@ async function loadAll() {
     api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"), api("/api/repos"),
   ]);
   Object.assign(state, { meta, models, videos, channels, lb, repos });
+  await loadExtras();
   fillSort();
   renderSidebar();
   render();
@@ -133,6 +140,7 @@ async function refreshData() {
     api("/api/meta"), api("/api/models"), api("/api/videos"), api("/api/channels"), api("/api/leaderboards"), api("/api/repos"),
   ]);
   Object.assign(state, { meta, models, videos, channels, lb, repos });
+  await loadExtras();
   state.lbEntries = {};
   // stato di analisi aggiornato nei video dei canali aperti (senza rileggere YouTube)
   for (const list of Object.values(state.channelVideos)) {
@@ -225,6 +233,7 @@ function renderSidebar() {
 
   $("#favToggle").classList.toggle("on", state.starred);
   $$("#views button").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
+  $("#cntNews").textContent = newsItems(7).length;
   const listView = state.view === "models" || state.view === "repos";
   $("#filters").style.display = listView ? "" : "none";
   $("#toolbar").style.display = listView ? "" : "none";
@@ -394,6 +403,11 @@ function renderChannels() {
       <input name="value" placeholder="@nomecanale oppure link del canale YouTube" autocomplete="off">
       <button class="btn primary">Aggiungi canale</button>
     </form>
+    ${state.suggested.length ? `<details class="suggested owner-only"><summary>Canali consigliati (${state.suggested.length})</summary>
+      <div class="sugg-grid">${state.suggested.map((c) => `
+        <div class="sugg"><div><b>${esc(c.name)}</b> <span class="muted">${esc(c.handle)}</span><div class="muted">${esc(c.about)}</div></div>
+          <button class="btn small" data-add-suggested="${esc(c.handle)}">＋ Aggiungi</button></div>`).join("")}</div>
+    </details>` : ""}
     <div class="list">${state.channels.map((c) => `
       <div class="crow ${c.enabled ? "" : "disabled"}">
         <label class="switch owner-only" title="Attivo nelle ricerche"><input type="checkbox" data-toggle-ch="${c.id}" ${c.enabled ? "checked" : ""}><span></span></label>
@@ -728,6 +742,113 @@ async function pollGithub() {
   }
 }
 
+// ---------- novità ----------
+
+const ORIGINS = {
+  video: "📺 Video", lookup: "🔎 Ricerca", hf_trending: "🤗 Hugging Face", hf_papers: "📄 Paper HF",
+  openrouter: "🔀 OpenRouter", hackernews: "🟧 Hacker News", github: "🔥 GitHub", import: "📥 Importazione",
+};
+
+async function loadExtras() {
+  const [digest, suggested] = await Promise.all([
+    api("/api/digest").catch(() => null),
+    api("/api/sources/suggested").catch(() => []),
+  ]);
+  state.digest = digest && digest.title ? digest : null;
+  state.suggested = suggested || [];
+}
+
+function repoOrigin(r) {
+  if (r.from_lookup) return "lookup";
+  if (r.from_video) return "video";
+  if (r.trending_topic === "hf-papers") return "hf_papers";
+  if (r.trending_topic === "hackernews") return "hackernews";
+  return r.from_trending ? "github" : "import";
+}
+
+function newsItems(days) {
+  const since = Date.now() - days * 86400000;
+  const recent = (x) => x.first_seen && Date.parse(x.first_seen) >= since;
+  return [
+    ...state.models.filter(recent).map((m) => ({ kind: "model", item: m, origin: m.origin || "video", at: m.first_seen })),
+    ...state.repos.filter(recent).map((r) => ({ kind: "repo", item: r, origin: repoOrigin(r), at: r.first_seen })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function dayLabel(iso) {
+  const d = new Date(iso);
+  const today = new Date();
+  const diff = Math.round((new Date(today.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (diff === 0) return "Oggi";
+  if (diff === 1) return "Ieri";
+  return d.toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
+}
+
+function renderDigest() {
+  const d = state.digest;
+  const button = `<button class="btn small owner-only" id="btnDigest" title="Claude scrive il riepilogo delle novità del periodo selezionato (usa l'abbonamento)">
+    📰 ${d ? "Aggiorna riepilogo" : "Scrivi il riepilogo"} (${state.newsDays} g)</button>`;
+  if (!d) {
+    return `<div class="digest empty-digest"><div><b>Riepilogo delle novità</b>
+      <div class="muted">Claude può scrivere una sintesi di ciò che è arrivato nel periodo, con le uscite più importanti.</div></div>${button}</div>`;
+  }
+  return `<div class="digest">
+    <div class="digest-head"><div><div class="digest-kicker">Riepilogo · ultimi ${d.days} giorni · ${esc(relTime(d.created_at))}</div>
+      <h2>${esc(d.title)}</h2></div>${button}</div>
+    <p>${esc(d.intro)}</p>
+    ${d.highlights?.length ? `<ol class="highlights">${d.highlights.map((h) => `<li>
+      ${h.id ? `<a href="#" data-news-${h.kind}="${h.id}">${esc(h.name)}</a>` : `<b>${esc(h.name)}</b>`} — ${esc(h.why)}</li>`).join("")}</ol>` : ""}
+    ${(d.sections || []).map((s) => `<p><b>${esc(s.category)}.</b> ${esc(s.text)}</p>`).join("")}
+  </div>`;
+}
+
+function renderNews() {
+  const all = newsItems(state.newsDays);
+  const byType = all.filter((x) => state.newsType === "all" || x.kind === state.newsType);
+  const list = byType.filter((x) => !state.newsSources.size || state.newsSources.has(x.origin));
+  const counts = {};
+  byType.forEach((x) => { counts[x.origin] = (counts[x.origin] || 0) + 1; });
+  const groups = [];
+  for (const x of list) {
+    const label = dayLabel(x.at);
+    if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, items: [] });
+    groups[groups.length - 1].items.push(x);
+  }
+  const nModels = all.filter((x) => x.kind === "model").length;
+  const nRepos = all.length - nModels;
+  return `
+    <div class="news-top">
+      <div class="seg">${[7, 30, 90].map((d) => `<button data-news-days="${d}" class="${state.newsDays === d ? "active" : ""}">${d} giorni</button>`).join("")}</div>
+      <div class="seg">${[["all", "Tutto"], ["model", "Modelli"], ["repo", "Repository"]].map(([k, l]) =>
+        `<button data-news-type="${k}" class="${state.newsType === k ? "active" : ""}">${l}</button>`).join("")}</div>
+      <span class="muted">${nModels} modelli e ${nRepos} repository negli ultimi ${state.newsDays} giorni</span>
+    </div>
+    <div class="chips news-src">${Object.entries(ORIGINS).filter(([k]) => counts[k] || state.newsSources.has(k)).map(([k, l]) =>
+      `<button class="chip ${state.newsSources.has(k) ? "on" : ""}" data-news-src="${k}">${l} <span class="count">${counts[k] || 0}</span></button>`).join("")}</div>
+    ${renderDigest()}
+    ${groups.length ? groups.map((g) => `
+      <h3 class="news-day">${esc(g.label)} <span class="count">${g.items.length}</span></h3>
+      <div class="news-list">${g.items.map((x) => newsRow(x)).join("")}</div>`).join("")
+      : `<div class="empty"><div class="big">🗞️</div><h3>Nessuna novità nel periodo</h3><p>Avvia una ricerca o allarga il periodo.</p></div>`}`;
+}
+
+function newsRow({ kind, item, origin }) {
+  const isModel = kind === "model";
+  const attr = isModel ? `data-news-model="${item.id}"` : `data-news-repo="${item.id}"`;
+  const extra = isModel
+    ? `${licBadge(item)}${item.parameters ? `<span class="badge">${esc(item.parameters)}</span>` : ""}${rankBadge(item)}`
+    : `<span class="badge">★ ${fmtStars(item.stars)}</span>${item.stars_per_day != null ? `<span class="badge growth">+${fmtStars(Math.round(item.stars_per_day))}/g</span>` : ""}`;
+  return `<div class="news-row" ${attr} style="--cat-color:${catColor(item.category)}">
+    <div class="news-icon" title="${isModel ? "Modello" : "Repository"}">${isModel ? "🧠" : "🐙"}</div>
+    <div class="grow">
+      <div class="news-name">${esc(item.name)} <span class="muted">${esc(isModel ? item.developer || "" : "")}</span></div>
+      <div class="badges">${catBadge(item)}${extra}<span class="badge src">${ORIGINS[origin] || origin}</span></div>
+      <div class="news-sum">${esc(item.summary || item.description || "")}</div>
+    </div>
+    <span class="meta-small">${new Date(item.first_seen).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}</span>
+  </div>`;
+}
+
 // ---------- vista classifiche ----------
 
 const LB_COLUMNS = {
@@ -904,6 +1025,7 @@ function render() {
     : state.view === "channels" ? renderChannels()
     : state.view === "leaderboards" ? renderLeaderboards()
     : state.view === "repos" ? renderRepos()
+    : state.view === "news" ? renderNews()
     : renderModels();
   $("#content").innerHTML = html;
 }
@@ -1072,6 +1194,7 @@ async function pollScan() {
   $("#btnScan").disabled = s.running;
   $("#scanTitle").textContent = s.running
     ? (s.phase === "queued" ? "In coda" : s.phase === "lookup" ? "Ricerca online" : s.phase === "hf" ? "Hugging Face: modelli di tendenza"
+      : s.phase === "sources" ? "Altre fonti: paper, OpenRouter, Hacker News" : s.phase === "digest" ? "Riepilogo delle novità"
       : s.phase === "github" ? "GitHub: repo di tendenza e dati" : s.phase === "discovery" ? "Ricerca nuovi video…" : `Analisi video ${Math.min(s.done + 1, s.total)} di ${s.total}`)
     : "Ricerca completata";
   $("#scanSub").textContent = s.running
@@ -1344,6 +1467,30 @@ function bindEvents() {
       Object.assign(state, { view: "models", videoFilter: sv.dataset.showVideo, category: "all" });
       renderSidebar();
       render();
+      return;
+    }
+    const sugg = t.closest("[data-add-suggested]");
+    if (sugg) {
+      try {
+        await api("/api/channels", { method: "POST", body: { value: sugg.dataset.addSuggested } });
+        toast(window.CLOUD ? "Richiesta inviata al PC" : "Canale aggiunto");
+        refreshData();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    // novità
+    const nd = t.closest("[data-news-days]");
+    if (nd) { state.newsDays = +nd.dataset.newsDays; render(); return; }
+    const nt = t.closest("[data-news-type]");
+    if (nt) { state.newsType = nt.dataset.newsType; render(); return; }
+    const ns = t.closest("[data-news-src]");
+    if (ns) { const k = ns.dataset.newsSrc; state.newsSources.has(k) ? state.newsSources.delete(k) : state.newsSources.add(k); render(); return; }
+    const nm = t.closest("[data-news-model]");
+    if (nm) { e.preventDefault(); openDrawer(+nm.dataset.newsModel); return; }
+    const nr = t.closest("[data-news-repo]");
+    if (nr) { e.preventDefault(); openRepoDrawer(+nr.dataset.newsRepo); return; }
+    if (t.closest("#btnDigest")) {
+      try { await startScan({ days: state.newsDays }, "/api/digest"); } catch (err) { toast(err.message); }
       return;
     }
     const latest = t.closest("[data-latest-ch]");

@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyzer, db, github, leaderboards, taxonomy, youtube
+from . import analyzer, db, github, leaderboards, sources, taxonomy, youtube
 from .config import STATIC_DIR, ensure_dirs, get_secret, load_settings, save_settings, set_secret
 from .cloud import agent
 from .leaderboards import refresher
@@ -259,6 +259,31 @@ def lookup(req: LookupRequest):
     if not scanner.start(lookup={"query": query[:200], "kind": "repo" if req.kind == "repo" else "model"}):
         raise HTTPException(409, "Una ricerca è già in corso")
     return {"ok": True}
+
+
+class DigestRequest(BaseModel):
+    days: int = 7
+
+
+@app.get("/api/digest")
+def get_digest():
+    return db.get_state("digest") or {}
+
+
+@app.post("/api/digest")
+def make_digest(req: DigestRequest):
+    """Riepilogo delle novità scritto da Claude (senza web): usa l'abbonamento, nessun costo a consumo."""
+    if github.refresher.state["running"]:
+        raise HTTPException(409, "È in corso un aggiornamento da GitHub: riprova tra poco")
+    if not scanner.start(digest={"days": max(1, min(req.days, 90))}):
+        raise HTTPException(409, "Una ricerca è già in corso")
+    return {"ok": True}
+
+
+@app.get("/api/sources/suggested")
+def suggested_channels():
+    have = {c["handle"].lower() for c in db.list_channels()}
+    return [c for c in sources.SUGGESTED_CHANNELS if c["handle"].lower() not in have]
 
 
 @app.post("/api/scan/cancel")

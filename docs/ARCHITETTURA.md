@@ -138,6 +138,35 @@ Il risultato (`lookup_result`: id dei modelli e repo, messaggio) resta nello sta
   e li manda a Claude a blocchi di 25 con `HF_SCHEMA`. I modelli rilevanti hanno `origin = "hf_trending"`.
   Viene eseguito durante la ricerca, al massimo ogni 12 ore (`hf_trending_at`).
 
+## Altre fonti (`app/sources.py`)
+
+`sources.discover()` è un passo della ricerca: viene eseguito al massimo ogni 12 ore (`app_state.sources_at`)
+e ognuna delle tre fonti si attiva separatamente:
+
+- `papers()`: `https://huggingface.co/api/daily_papers?date=…` degli ultimi 7 giorni, con almeno `papers_min_upvotes` voti;
+- `openrouter()`: `https://openrouter.ai/api/v1/models` creati negli ultimi `openrouter_days` giorni, non già in catalogo;
+- `hackernews()`: ricerca Algolia di HN sulle storie della settimana, con almeno `hn_min_points` punti e URL su
+  github.com o huggingface.co. I dati dei repo vengono letti da GitHub, quelli dei modelli da Hugging Face.
+
+Ogni fonte passa i candidati a Claude in un'unica chiamata (`LOOKUP_SCHEMA`, senza web, effort basso). Gli elementi
+valutati finiscono in `app_state.seen_papers`, `seen_openrouter` e `seen_hn`. I modelli hanno `origin` uguale a
+`hf_papers`, `openrouter` o `hackernews`; i repo sono salvati come tendenze con `trending_topic` `hf-papers` o
+`hackernews`.
+
+## Novità e riepilogo
+
+La vista Novità è calcolata nel browser da `first_seen` di modelli e repository. Il riepilogo è una modalità dello
+scanner (`POST /api/digest {days}` oppure il lavoro `digest` dal sito): `analyzer.build_digest_prompt` + `DIGEST_SCHEMA`
+(`title`, `intro`, `highlights`, `sections`), senza web. Il risultato è salvato in `app_state.digest`, con gli id degli
+elementi in evidenza, e pubblicato su Firestore in `meta/digest`.
+
+## Uso di Claude solo con l'abbonamento
+
+`analyzer._env()` rimuove sempre le variabili della fatturazione a consumo (`_PAY_PER_USE_VARS`).
+`analyzer.require_subscription()`, chiamata da `run_analysis`, legge `claude auth status` (con una cache di 5 minuti)
+e solleva un `AnalysisError` di tipo `limit` se il login non è quello dell'abbonamento. Così la ricerca si ferma come
+al raggiungimento del limite d'uso.
+
 ## Formato di esportazione
 
 `db.export_catalog()` e `db.import_catalog()` definiscono il formato portabile usato da *Esporta*/*Importa*
@@ -206,7 +235,7 @@ SQLite in modalità WAL; tutte le scritture passano da un `RLock`, perché la co
 | `repos` | repository GitHub: chiave `full_name` (`owner/repo` minuscolo), testi di Claude, dati GitHub, `stars_history`, fonti (`from_video`, `from_trending`), preferito e note |
 | `repo_sources` | relazione repository ↔ video con `timestamp_sec` |
 | `deleted_repos` | repository eliminati |
-| `app_state` | stato interno in JSON: `github_trending_at`, `github_ignored`, `hf_trending_at`, `hf_ignored` |
+| `app_state` | stato interno in JSON: `github_trending_at`, `github_ignored`, `hf_trending_at`, `hf_ignored`, `sources_at`, `seen_papers`, `seen_openrouter`, `seen_hn`, `digest` |
 
 Le colonne aggiunte dopo la prima versione (`models.origin`, `models.origin_detail`, `repos.from_lookup`) vengono create
 da `db._migrate()` all'avvio.
@@ -243,6 +272,8 @@ Al primo avvio viene creato il canale `@theAIsearch`; al riavvio i video rimasti
 | GET / POST | `/api/channels` | elenco / aggiunta (`{"value": "@canale"}` o URL) |
 | PATCH / DELETE | `/api/channels/{id}` | attiva/disattiva, rinomina / rimuove |
 | GET | `/api/channels/{id}/latest?limit=20` | ultimi caricamenti del canale (yt-dlp, date dal feed RSS di YouTube) con lo stato di analisi |
+| GET / POST | `/api/digest` | riepilogo salvato / ne scrive uno nuovo: `{"days": 7}` |
+| GET | `/api/sources/suggested` | canali YouTube consigliati non ancora aggiunti |
 | POST | `/api/lookup` | ricerca online di un modello o repository: `{"query": "…", "kind": "model" \| "repo"}` |
 | GET | `/api/videos` | video scoperti con stato |
 | POST | `/api/scan` | avvia una ricerca: `{"channel_ids"?: [..], "limit"?: n, "force"?: bool}` |

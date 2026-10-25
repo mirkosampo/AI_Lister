@@ -296,6 +296,8 @@ class CloudAgent:
             self.state["last_error"] = "Sul sito c'è una versione più recente dell'app: aggiorna questa copia."
             return
         ref.set(content)
+        # riepilogo delle novità (pubblico come il resto del catalogo)
+        self.client.collection("meta").document("digest").set(db.get_state("digest") or {})
 
     def _push_leaderboards(self):
         fetched = db.leaderboards_fetched_at()
@@ -372,8 +374,10 @@ class CloudAgent:
         self.state["current_job"] = ref.id
         self._heartbeat()
         try:
-            if kind in ("scan", "videos", "lookup"):
-                if kind == "lookup":
+            if kind in ("scan", "videos", "lookup", "digest"):
+                if kind == "digest":
+                    started = scanner.start(digest={"days": max(1, min(int(params.get("days") or 7), 90))})
+                elif kind == "lookup":
                     q = str(params.get("query") or "").strip()[:200]
                     if len(q) < 2:
                         raise ValueError("testo da cercare troppo corto")

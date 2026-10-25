@@ -20,7 +20,7 @@ Oggi le ricerche partono solo a mano. Un pianificatore interno, ad esempio "ogni
 orari e fonti scelti nelle impostazioni, terrebbe il catalogo aggiornato senza interventi. Come alternativa più semplice
 si può usare l'Utilità di pianificazione di Windows per avviare l'app all'accensione del PC.
 
-### 2. Vista "Novità" e riepilogo ⭐
+### 2. ✅ Vista "Novità" e riepilogo
 Una sequenza temporale di ciò che è entrato nel catalogo (modelli, repo, salite in classifica), raggruppata per giorno
 e filtrabile per categoria. In più un riepilogo settimanale scritto da Claude ("le 10 uscite più importanti della
 settimana"), consultabile anche dal sito e dal telefono.
@@ -35,7 +35,10 @@ Seguire sviluppatori (Qwen, DeepSeek, Black Forest Labs…), famiglie di modelli
 mirato le loro organizzazioni su Hugging Face e GitHub e i loro blog, e segnala le nuove versioni,
 ad esempio "è uscito Qwen 4".
 
-### 5. Più fonti
+### 5. ✅ Più fonti (in parte)
+Fatto: 15 canali YouTube consigliati, paper di tendenza su Hugging Face, OpenRouter, Hacker News.
+Restano: feed RSS di blog e newsletter, release GitHub dei repo seguiti; Reddit blocca l'accesso anonimo.
+
 - **Altri canali YouTube**: Two Minute Papers, Matthew Berman, AI Explained, Fireship, bycloud, Wes Roth, MattVidPro,
   Sam Witteveen, 1littlecoder. Basta aggiungerli nella scheda Canali, ma conviene una selezione suggerita.
 - **Paper di tendenza su Hugging Face** (huggingface.co/papers): i paper più discussi, spesso con modello e codice.
